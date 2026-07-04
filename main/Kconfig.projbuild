@@ -1,0 +1,56 @@
+menu "SCADAESP32 Modbus RTU"
+
+config SCADA_UART_TX_PIN
+    int "UART2 TX GPIO"
+    default 17
+    help
+        ESP32 TX pin connected to RXD on the TTL-RS485 module.
+
+config SCADA_UART_RX_PIN
+    int "UART2 RX GPIO"
+    default 16
+    help
+        ESP32 RX pin connected to TXD on the TTL-RS485 module.
+
+config SCADA_MODBUS_BAUDRATE
+    int "Modbus RTU baudrate"
+    default 9600
+
+choice SCADA_MODBUS_PARITY
+    prompt "Modbus RTU parity"
+    default SCADA_MODBUS_PARITY_NONE
+
+    config SCADA_MODBUS_PARITY_NONE
+        bool "None / 8N1"
+
+    config SCADA_MODBUS_PARITY_EVEN
+        bool "Even / 8E1"
+
+    config SCADA_MODBUS_PARITY_ODD
+        bool "Odd / 8O1"
+endchoice
+
+config SCADA_MODBUS_SLAVE_ID
+    int "Default Modbus slave ID"
+    range 1 247
+    default 1
+
+config SCADA_MODBUS_FUNCTION_CODE
+    hex "Read function code: 0x03 holding, 0x04 input"
+    range 0x03 0x04
+    default 0x03
+
+config SCADA_MODBUS_START_REGISTER
+    hex "Start register"
+    default 0x0000
+
+config SCADA_MODBUS_REGISTER_COUNT
+    int "Register count"
+    range 1 64
+    default 2
+
+config SCADA_MODBUS_POLL_INTERVAL_MS
+    int "Polling interval in milliseconds"
+    default 2000
+
+endmenu
