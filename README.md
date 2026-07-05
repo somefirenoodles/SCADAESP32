@@ -2,7 +2,7 @@
 
 Firmware ESP-IDF para validar una interfaz ESP32 + TTL-RS485 y dejar listo un maestro Modbus RTU para leer un dispositivo RS485 real.
 
-El objetivo inmediato es que el ESP32 envie solicitudes Modbus RTU por UART2 y descarte ruido mediante validacion de trama y CRC16. Con un esclavo Modbus real conectado a `A/B`, el firmware imprime registros leidos en consola.
+El objetivo inmediato es que el ESP32 envie solicitudes Modbus RTU por UART2 y descarte ruido mediante sincronizacion de trama y validacion CRC16. Con un esclavo Modbus real conectado a `A/B`, el firmware imprime registros leidos en consola.
 
 ## Estado del proyecto
 
@@ -12,9 +12,11 @@ Implementado:
 - UART2 en `GPIO17` TX y `GPIO16` RX.
 - Maestro Modbus RTU.
 - Lectura por funcion `0x03` o `0x04`.
-- Validacion de `slave_id`, `function_code`, longitud y `CRC16`.
+- Sincronizacion de trama por `slave_id` y `function_code`.
+- Validacion de longitud y `CRC16`.
+- Descarte de ruido de bus flotante.
 - Configuracion por `idf.py menuconfig`.
-- Scripts PowerShell para build, flash, monitor y limpieza.
+- Scripts PowerShell y POSIX para build, flash y monitor.
 
 No implementado todavia:
 
@@ -105,10 +107,19 @@ Con `A/B` desconectado, es normal ver:
 RX: timeout. No hay respuesta valida.
 ```
 
-Tambien puede aparecer ruido y ser descartado como:
+Tambien puede aparecer ruido descartado:
+
+```text
+RX ruido descartado: E0 30 80 80 83 E6 FC
+Sin inicio de trama valido: esperado slave_id=0x01.
+Lectura fallida. Codigo=-1
+```
+
+O una trama detectada pero corrupta:
 
 ```text
 Error: CRC invalido
+Lectura fallida. Codigo=-3
 ```
 
 Eso indica que RX recibe actividad electrica, pero no una trama Modbus valida.
@@ -135,6 +146,7 @@ Si no hay respuesta:
 5. Verifica si el dispositivo usa funcion `0x03` o `0x04`.
 6. Verifica la direccion inicial del registro.
 7. Usa resistencia de 120 ohm entre `A` y `B` solo si corresponde a extremo de bus.
+8. Si `A/B` estan sin conectar y aparece ruido repetido, agrega polarizacion/fail-safe solo para prueba: pull-up en A, pull-down en B y 120 ohm entre A/B.
 
 ## Advertencia sobre FoxESS
 
