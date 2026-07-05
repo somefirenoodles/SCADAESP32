@@ -10,6 +10,7 @@
 
 #define UART_PORT UART_NUM_2
 #define RX_BUF_SIZE 256
+#define NOISE_BUF_SIZE 64
 
 #if CONFIG_SCADA_MODBUS_PARITY_EVEN
 #define SCADA_UART_PARITY UART_PARITY_EVEN
@@ -57,6 +58,101 @@ static const char *parity_name(void)
 #endif
 }
 
+static void push_noise(uint8_t *noise, int *noise_len, uint8_t value)
+{
+    if (*noise_len < NOISE_BUF_SIZE) {
+        noise[*noise_len] = value;
+        (*noise_len)++;
+    }
+}
+
+static int read_modbus_frame(uint8_t slave_id,
+                             uint8_t function_code,
+                             uint8_t *response,
+                             int response_max_len,
+                             int timeout_ms)
+{
+    int elapsed_ms = 0;
+    int total = 0;
+    int expected_len = 0;
+    uint8_t noise[NOISE_BUF_SIZE] = {0};
+    int noise_len = 0;
+
+    while (elapsed_ms < timeout_ms) {
+        uint8_t byte = 0;
+        int len = uart_read_bytes(UART_PORT, &byte, 1, pdMS_TO_TICKS(20));
+
+        if (len <= 0) {
+            elapsed_ms += 20;
+            continue;
+        }
+
+        if (total == 0) {
+            if (byte != slave_id) {
+                push_noise(noise, &noise_len, byte);
+                continue;
+            }
+
+            response[total++] = byte;
+            continue;
+        }
+
+        if (total == 1) {
+            if (byte != function_code && byte != (uint8_t)(function_code | 0x80)) {
+                push_noise(noise, &noise_len, response[0]);
+                push_noise(noise, &noise_len, byte);
+                total = 0;
+                expected_len = 0;
+                continue;
+            }
+
+            response[total++] = byte;
+
+            if (byte == (uint8_t)(function_code | 0x80)) {
+                expected_len = 5; // slave + exception function + exception code + crc2
+            }
+            continue;
+        }
+
+        if (total == 2 && response[1] == function_code) {
+            int byte_count = byte;
+            if (byte_count <= 0 || byte_count > (response_max_len - 5)) {
+                push_noise(noise, &noise_len, response[0]);
+                push_noise(noise, &noise_len, response[1]);
+                push_noise(noise, &noise_len, byte);
+                total = 0;
+                expected_len = 0;
+                continue;
+            }
+
+            response[total++] = byte;
+            expected_len = 3 + byte_count + 2;
+            continue;
+        }
+
+        if (total < response_max_len) {
+            response[total++] = byte;
+        } else {
+            printf("Error: buffer RX lleno.\n");
+            return -8;
+        }
+
+        if (expected_len > 0 && total >= expected_len) {
+            return total;
+        }
+    }
+
+    if (noise_len > 0) {
+        printf("RX ruido descartado: ");
+        print_hex(noise, noise_len);
+        printf("Sin inicio de trama valido: esperado slave_id=0x%02X.\n", slave_id);
+    } else {
+        printf("RX: timeout. No hay respuesta valida.\n");
+    }
+
+    return -1;
+}
+
 static int modbus_read_registers(uint8_t slave_id,
                                  uint8_t function_code,
                                  uint16_t start_register,
@@ -95,39 +191,9 @@ static int modbus_read_registers(uint8_t slave_id,
     uart_write_bytes(UART_PORT, (const char *)request, sizeof(request));
     uart_wait_tx_done(UART_PORT, pdMS_TO_TICKS(200));
 
-    int total = 0;
-    int expected_normal_len = 5 + (register_count * 2); // slave + fc + byte_count + data + crc2
-    const int timeout_ms = 1000;
-    int elapsed_ms = 0;
-
-    while (elapsed_ms < timeout_ms && total < response_max_len) {
-        int len = uart_read_bytes(UART_PORT,
-                                  response + total,
-                                  response_max_len - total,
-                                  pdMS_TO_TICKS(50));
-
-        if (len > 0) {
-            total += len;
-
-            if (total >= expected_normal_len &&
-                response[0] == slave_id &&
-                response[1] == function_code) {
-                break;
-            }
-
-            if (total >= 5 &&
-                response[0] == slave_id &&
-                response[1] == (function_code | 0x80)) {
-                break;
-            }
-        }
-
-        elapsed_ms += 50;
-    }
-
-    if (total <= 0) {
-        printf("RX: timeout. No hay respuesta valida.\n");
-        return -1;
+    int total = read_modbus_frame(slave_id, function_code, response, response_max_len, 1000);
+    if (total < 0) {
+        return total;
     }
 
     printf("RX bruto: ");
@@ -143,24 +209,13 @@ static int modbus_read_registers(uint8_t slave_id,
 
     if (crc_calc != crc_recv) {
         printf("Error: CRC invalido. calc=0x%04X recv=0x%04X\n", crc_calc, crc_recv);
+        printf("Diagnostico: trama detectada pero corrupta. Revise A/B, baudrate, paridad, GND comun o ruido del bus.\n");
         return -3;
     }
 
-    if (response[0] != slave_id) {
-        printf("Error: slave ID incorrecto. esperado=%u recibido=%u\n", slave_id, response[0]);
-        return -4;
-    }
-
-    if (response[1] == (function_code | 0x80)) {
+    if (response[1] == (uint8_t)(function_code | 0x80)) {
         printf("Excepcion Modbus. Codigo=0x%02X\n", response[2]);
         return -5;
-    }
-
-    if (response[1] != function_code) {
-        printf("Error: function code incorrecto. esperado=0x%02X recibido=0x%02X\n",
-               function_code,
-               response[1]);
-        return -6;
     }
 
     int byte_count = response[2];
@@ -213,7 +268,7 @@ void app_main(void)
            CONFIG_SCADA_MODBUS_REGISTER_COUNT,
            CONFIG_SCADA_MODBUS_POLL_INTERVAL_MS);
     printf("Cableado: ESP32 GPIO17->RXD modulo, GPIO16<-TXD modulo, GND comun, VCC segun modulo.\n");
-    printf("A/B deben ir a un esclavo RS485 real. Con A/B flotando puede aparecer ruido/CRC invalido.\n");
+    printf("A/B deben ir a un esclavo RS485 real. Con A/B flotando puede aparecer ruido descartado o CRC invalido.\n");
 
     uint8_t response[RX_BUF_SIZE];
 
