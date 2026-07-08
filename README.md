@@ -1,8 +1,7 @@
 # SCADAESP32
 
-Firmware ESP-IDF para validar una interfaz ESP32 + TTL-RS485 y dejar listo un maestro Modbus RTU para leer un dispositivo RS485 real.
+dejar listo un maestro Modbus RTU para leer RS485
 
-El objetivo inmediato es que el ESP32 envie solicitudes Modbus RTU por UART2 y descarte ruido mediante sincronizacion de trama y validacion CRC16. Con un esclavo Modbus real conectado a `A/B`, el firmware imprime registros leidos en consola.
 
 ## Estado del proyecto
 
@@ -18,7 +17,7 @@ Implementado:
 - Configuracion por `idf.py menuconfig`.
 - Scripts PowerShell y POSIX para build, flash y monitor.
 
-No implementado todavia:
+No para implementado todavia:
 
 - MQTT.
 - Telegraf / TimescaleDB.
