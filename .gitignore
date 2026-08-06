@@ -22,3 +22,10 @@ venv/
 
 # Logs
 *.log
+
+# Arduino firmware credentials and build output
+**/secrets.h
+/tmp/
+*.bin
+*.elf
+*.map
