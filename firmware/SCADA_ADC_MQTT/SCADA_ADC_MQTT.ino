@@ -3,7 +3,7 @@
 
   Analog input:
     ADS1263 IN9 positive input
-    ADS1263 COM negative input (COM-AVSS jumper installed)
+    ADS1263 IN1 negative input
 
   ADS1263 SPI:
     CS=27, SCLK=18, MISO/DOUT=19, MOSI/DIN=23, DRDY=25, RESET=26
@@ -65,16 +65,25 @@ constexpr uint8_t MODE2_PGA_BYPASS_2400_SPS = 0x8A;
 constexpr uint8_t MODE2_PGA_GAIN1_2400_SPS = 0x0A;
 constexpr uint8_t REFMUX_INTERNAL_2V5 = 0x00;
 constexpr uint8_t REFMUX_AVDD_AVSS = 0x24;
-constexpr uint8_t INPMUX_IN9_COM = 0x9A;
+constexpr uint8_t INPMUX_IN9_IN1 = 0x91;
 constexpr uint8_t INPMUX_ANALOG_SUPPLY_MONITOR = 0xCC;
 }  // namespace Ads
 
 constexpr float NOMINAL_ANALOG_SUPPLY_V = 5.000f;
 constexpr float INTERNAL_REFERENCE_V = 2.500f;
 
-// System calibration obtained with SDG1032X, 2.000 V and 3.000 V endpoints.
+// Previous IN9-COM calibration. CALIBRATION_MODE reports replacement values
+// for the new IN9-IN1 differential wiring; do not change them by estimation.
 constexpr float INPUT_CAL_GAIN = 0.8995233f;
 constexpr float INPUT_CAL_OFFSET_V = -0.0390393f;
+
+// Keep true for the local SDG1032X calibration test. In this mode WiFi/MQTT
+// are disabled and no current value is published as if it were production.
+constexpr bool CALIBRATION_MODE = true;
+constexpr float CALIBRATION_LOW_V = 2.000f;
+constexpr float CALIBRATION_HIGH_V = 3.000f;
+constexpr float CALIBRATION_FREQUENCY_HZ = 60.0f;
+constexpr uint32_t CALIBRATION_REPORT_INTERVAL_MS = 1000;
 
 constexpr float SCT_PRIMARY_A = 100.0f;
 constexpr float SCT_SECONDARY_A = 0.050f;
@@ -85,9 +94,6 @@ constexpr float CHARGING_THRESHOLD_A = 1.0f;
 constexpr size_t WINDOW_SAMPLES = 1200;
 constexpr uint32_t DRDY_TIMEOUT_US = 100000;
 constexpr float MIN_FREQUENCY_RMS_V = 0.005f;
-constexpr float COMMON_MODE_MIN_V = 2.0f;
-constexpr float COMMON_MODE_MAX_V = 3.0f;
-
 constexpr uint32_t PUBLISH_INTERVAL_MS = 5000;
 constexpr uint32_t WIFI_RETRY_MS = 10000;
 constexpr uint32_t MQTT_RETRY_MS = 5000;
@@ -268,7 +274,7 @@ bool configureAds1263() {
   writeRegister(Ads::REG_MODE1, Ads::MODE1_FIR);
   writeRegister(Ads::REG_MODE2, Ads::MODE2_PGA_BYPASS_2400_SPS);
   writeRegister(Ads::REG_REFMUX, Ads::REFMUX_AVDD_AVSS);
-  writeRegister(Ads::REG_INPMUX, Ads::INPMUX_IN9_COM);
+  writeRegister(Ads::REG_INPMUX, Ads::INPMUX_IN9_IN1);
 
   bool ok = true;
   ok &= verifyRegister("POWER", Ads::REG_POWER, Ads::POWER_INTREF_ON);
@@ -279,7 +285,7 @@ bool configureAds1263() {
   ok &= verifyRegister("MODE2", Ads::REG_MODE2,
                        Ads::MODE2_PGA_BYPASS_2400_SPS);
   ok &= verifyRegister("REFMUX", Ads::REG_REFMUX, Ads::REFMUX_AVDD_AVSS);
-  ok &= verifyRegister("INPMUX", Ads::REG_INPMUX, Ads::INPMUX_IN9_COM);
+  ok &= verifyRegister("INPMUX", Ads::REG_INPMUX, Ads::INPMUX_IN9_IN1);
   if (!ok) {
     return false;
   }
@@ -315,7 +321,7 @@ bool measureAnalogSupply(float& supplyV) {
 
   const bool restored =
       selectConversion(Ads::MODE2_PGA_BYPASS_2400_SPS,
-                       Ads::REFMUX_AVDD_AVSS, Ads::INPMUX_IN9_COM);
+                       Ads::REFMUX_AVDD_AVSS, Ads::INPMUX_IN9_IN1);
   return ok && restored;
 }
 
@@ -402,7 +408,7 @@ bool runMathSelfTest() {
   return ok;
 }
 
-bool captureWindow(Metrics& metrics) {
+bool captureWindow(Metrics& metrics, Metrics& rawMetrics) {
   size_t captured = 0;
   const uint32_t startedUs = micros();
   uint32_t firstSampleUs = 0;
@@ -422,13 +428,16 @@ bool captureWindow(Metrics& metrics) {
       firstSampleUs = now;
     }
     lastSampleUs = now;
-    sampleBuffer[captured++] =
-        calibrateInputVoltage(rawToVolts(raw, adcFullScaleV));
+    sampleBuffer[captured++] = rawToVolts(raw, adcFullScaleV);
   }
 
-  metrics = calculateMetrics(
-      sampleBuffer, WINDOW_SAMPLES,
-      static_cast<uint32_t>(lastSampleUs - firstSampleUs));
+  const uint32_t elapsedUs =
+      static_cast<uint32_t>(lastSampleUs - firstSampleUs);
+  rawMetrics = calculateMetrics(sampleBuffer, WINDOW_SAMPLES, elapsedUs);
+  for (float& sample : sampleBuffer) {
+    sample = calibrateInputVoltage(sample);
+  }
+  metrics = calculateMetrics(sampleBuffer, WINDOW_SAMPLES, elapsedUs);
   return true;
 }
 
@@ -437,16 +446,55 @@ float voltageRmsToCurrent(float rmsV) {
   return rmsV * transformerRatio / BURDEN_OHM * CURRENT_CAL_GAIN;
 }
 
-bool metricsAreValid(const Metrics& m) {
-  const bool lowRail = m.minV < calibrateInputVoltage(0.05f);
-  const bool highRail =
-      m.maxV > calibrateInputVoltage(adcFullScaleV - 0.05f);
-  const bool commonModeOk =
-      m.meanV >= COMMON_MODE_MIN_V && m.meanV <= COMMON_MODE_MAX_V;
+bool metricsAreValid(const Metrics& m, const Metrics& raw) {
+  // IN9-IN1 is bipolar: a negative differential voltage is valid. Only a
+  // value close to either differential full-scale limit indicates a rail.
+  const bool lowRail = raw.minV < -(adcFullScaleV - 0.05f);
+  const bool highRail = raw.maxV > (adcFullScaleV - 0.05f);
   const bool frequencyOk =
       m.rmsAcV < MIN_FREQUENCY_RMS_V ||
       (m.frequencyHz >= 45.0f && m.frequencyHz <= 65.0f);
-  return !lowRail && !highRail && commonModeOk && frequencyOk;
+  const bool finite = isfinite(m.meanV) && isfinite(m.rmsAcV) &&
+                      isfinite(m.frequencyHz);
+  return !lowRail && !highRail && frequencyOk && finite;
+}
+
+void printCalibrationReport(const Metrics& raw, const Metrics& calibrated) {
+  Serial.printf(
+      "[RAW IN9-IN1] media=%.6f V | AC_RMS=%.6f V | Vpp=%.6f V | "
+      "min=%.6f V | max=%.6f V | f=%.2f Hz | Fs=%.1f SPS\n",
+      raw.meanV, raw.rmsAcV, raw.vppV, raw.minV, raw.maxV,
+      raw.frequencyHz, raw.sampleRate);
+  Serial.printf(
+      "[CAL ACTUAL] media=%.6f V | AC_RMS=%.6f V | Vpp=%.6f V | "
+      "min=%.6f V | max=%.6f V\n",
+      calibrated.meanV, calibrated.rmsAcV, calibrated.vppV,
+      calibrated.minV, calibrated.maxV);
+
+  const float expectedMean =
+      (CALIBRATION_HIGH_V + CALIBRATION_LOW_V) * 0.5f;
+  const float expectedPeak =
+      (CALIBRATION_HIGH_V - CALIBRATION_LOW_V) * 0.5f;
+  const float measuredPeak = raw.rmsAcV * sqrtf(2.0f);
+  const bool sineIsValid =
+      measuredPeak > 0.05f &&
+      fabsf(raw.frequencyHz - CALIBRATION_FREQUENCY_HZ) <= 1.0f;
+
+  if (!sineIsValid) {
+    Serial.printf(
+        "[CAL ESPERA] Aplique seno %.1f Hz, Low=%.3f V, High=%.3f V, "
+        "Phase=0.\n",
+        CALIBRATION_FREQUENCY_HZ, CALIBRATION_LOW_V,
+        CALIBRATION_HIGH_V);
+    return;
+  }
+
+  const float suggestedGain = expectedPeak / measuredPeak;
+  const float suggestedOffset = expectedMean - suggestedGain * raw.meanV;
+  Serial.printf(
+      "[CONST SUGERIDAS] INPUT_CAL_GAIN=%.7ff | "
+      "INPUT_CAL_OFFSET_V=%.7ff\n",
+      suggestedGain, suggestedOffset);
 }
 
 size_t encodeRemainingLength(size_t length, uint8_t out[4]) {
@@ -659,8 +707,8 @@ void maintainConnections() {
   }
 }
 
-void buildAndQueuePayload(const Metrics& m) {
-  const bool valid = metricsAreValid(m);
+void buildAndQueuePayload(const Metrics& m, const Metrics& raw) {
+  const bool valid = metricsAreValid(m, raw);
   const float currentRmsA = valid ? voltageRmsToCurrent(m.rmsAcV) : 0.0f;
   const bool charging = valid && currentRmsA >= CHARGING_THRESHOLD_A;
   const time_t now = time(nullptr);
@@ -693,7 +741,8 @@ void buildAndQueuePayload(const Metrics& m) {
 void setup() {
   Serial.begin(115200);
   delay(800);
-  Serial.println("\nSCADA SCT-013 + ADS1263 + MQTT");
+  Serial.println("\n[BOOT] SCADA SCT-013 + ADS1263");
+  Serial.println("[ADC] Entrada diferencial IN9-IN1");
 
   pinMode(Pins::CS, OUTPUT);
   pinMode(Pins::RESET, OUTPUT);
@@ -722,30 +771,54 @@ void setup() {
     Serial.println("[ADC] Supply monitor failed; using 5.000 V.");
   }
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(SCADA_WIFI_SSID, SCADA_WIFI_PASSWORD);
-  lastWifiAttemptMs = millis();
-  configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
+  if (CALIBRATION_MODE) {
+    WiFi.mode(WIFI_OFF);
+    Serial.println(
+        "[MODE] CALIBRACION LOCAL: WiFi y MQTT desactivados.");
+    Serial.printf(
+        "[GEN] Sine %.1f Hz | High=%.3f V | Low=%.3f V | Phase=0\n",
+        CALIBRATION_FREQUENCY_HZ, CALIBRATION_HIGH_V,
+        CALIBRATION_LOW_V);
+  } else {
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(SCADA_WIFI_SSID, SCADA_WIFI_PASSWORD);
+    lastWifiAttemptMs = millis();
+    configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
+  }
 }
 
 void loop() {
-  maintainConnections();
+  if (!CALIBRATION_MODE) {
+    maintainConnections();
+  }
 
   Metrics metrics;
-  if (!captureWindow(metrics)) {
+  Metrics rawMetrics;
+  if (!captureWindow(metrics, rawMetrics)) {
     Serial.println("[ADC] Capture failed.");
-    maintainConnections();
+    if (!CALIBRATION_MODE) {
+      maintainConnections();
+    }
     delay(100);
     return;
   }
 
   const uint32_t now = millis();
-  if (static_cast<uint32_t>(now - lastPublishMs) >= PUBLISH_INTERVAL_MS) {
+  const uint32_t interval = CALIBRATION_MODE
+                                ? CALIBRATION_REPORT_INTERVAL_MS
+                                : PUBLISH_INTERVAL_MS;
+  if (static_cast<uint32_t>(now - lastPublishMs) >= interval) {
     lastPublishMs = now;
-    buildAndQueuePayload(metrics);
+    if (CALIBRATION_MODE) {
+      printCalibrationReport(rawMetrics, metrics);
+    } else {
+      buildAndQueuePayload(metrics, rawMetrics);
+    }
   }
 
-  maintainConnections();
+  if (!CALIBRATION_MODE) {
+    maintainConnections();
+  }
   delay(25);
 }
