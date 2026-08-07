@@ -65,7 +65,7 @@ Se mide diferencialmente `IN1` respecto a `IN0` (`IN1-IN0`). Una tension diferen
 
 ## Recalibracion IN1-IN0
 
-El firmware se entrega temporalmente con `CALIBRATION_MODE=true`. En ese modo desactiva WiFi/MQTT y espera en el generador:
+Para repetir la calibracion se cambia temporalmente a `CALIBRATION_MODE=true`. En ese modo desactiva WiFi/MQTT y espera en el generador:
 
 ```text
 Sine, 60 Hz, High=3.000 V, Low=1.500 V, Phase=0
@@ -80,4 +80,4 @@ INPUT_CAL_GAIN=0.9412289
 INPUT_CAL_OFFSET_V=-0.0512069 V
 ```
 
-Estas constantes provienen de 21 ventanas estables. Su promedio crudo fue media=2.444896 V, AC_RMS=0.563444 V y Vpp=1.595965 V; despues de calibrar se obtiene media=2.250000 V, AC_RMS=0.530330 V y Vpp=1.502168 V. El modo de calibracion tambien verifica la relacion Vpp/RMS de la senoide y rechaza ventanas de conexion, saturacion o deformacion antes de proponer constantes.
+Estas constantes provienen de 21 ventanas estables. Su promedio crudo fue media=2.444896 V, AC_RMS=0.563444 V y Vpp=1.595965 V; despues de calibrar se obtiene media=2.250000 V, AC_RMS=0.530330 V y Vpp=1.502168 V. El modo de calibracion tambien verifica la relacion Vpp/RMS de la senoide y rechaza ventanas de conexion, saturacion o deformacion antes de proponer constantes. La version operacional usa `CALIBRATION_MODE=false` para conectarse a WiFi y publicar por MQTT.

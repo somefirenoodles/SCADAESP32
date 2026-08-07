@@ -79,7 +79,7 @@ constexpr float INPUT_CAL_OFFSET_V = -0.0512069f;
 
 // Keep true for the local SDG1032X calibration test. In this mode WiFi/MQTT
 // are disabled and no current value is published as if it were production.
-constexpr bool CALIBRATION_MODE = true;
+constexpr bool CALIBRATION_MODE = false;
 constexpr float CALIBRATION_LOW_V = 1.500f;
 constexpr float CALIBRATION_HIGH_V = 3.000f;
 constexpr float CALIBRATION_FREQUENCY_HZ = 60.0f;
