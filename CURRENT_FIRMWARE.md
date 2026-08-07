@@ -68,7 +68,7 @@ Se mide diferencialmente `IN1` respecto a `IN0` (`IN1-IN0`). Una tension diferen
 El firmware se entrega temporalmente con `CALIBRATION_MODE=true`. En ese modo desactiva WiFi/MQTT y espera en el generador:
 
 ```text
-Sine, 60 Hz, High=3.000 V, Low=2.000 V, Phase=0
+Sine, 60 Hz, High=3.000 V, Low=1.500 V, Phase=0
 ```
 
 Conecte la salida del generador a IN1 y su retorno a IN0. El monitor serie a 115200 baud muestra `[RAW IN1-IN0]` y calcula `[CONST SUGERIDAS]` usando la media y el RMS de la senoide, que son mas resistentes al ruido que tomar solamente dos muestras extremas. Las constantes se sustituyen en el codigo despues de observar varias ventanas estables; posteriormente se cambia `CALIBRATION_MODE=false` para habilitar MQTT.
@@ -76,8 +76,8 @@ Conecte la salida del generador a IN1 y su retorno a IN0. El monitor serie a 115
 La calibracion obtenida despues de corregir la polaridad fisica es:
 
 ```text
-INPUT_CAL_GAIN=1.7803975
-INPUT_CAL_OFFSET_V=-1.1079215 V
+INPUT_CAL_GAIN=0.9412289
+INPUT_CAL_OFFSET_V=-0.0512069 V
 ```
 
-El modo de calibracion tambien verifica la relacion Vpp/RMS de la senoide y rechaza ventanas de conexion, saturacion o deformacion antes de proponer constantes.
+Estas constantes provienen de 21 ventanas estables. Su promedio crudo fue media=2.444896 V, AC_RMS=0.563444 V y Vpp=1.595965 V; despues de calibrar se obtiene media=2.250000 V, AC_RMS=0.530330 V y Vpp=1.502168 V. El modo de calibracion tambien verifica la relacion Vpp/RMS de la senoide y rechaza ventanas de conexion, saturacion o deformacion antes de proponer constantes.

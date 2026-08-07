@@ -73,14 +73,14 @@ constexpr float NOMINAL_ANALOG_SUPPLY_V = 5.000f;
 constexpr float INTERNAL_REFERENCE_V = 2.500f;
 
 // IN1-IN0 calibration obtained with the SDG1032X after correcting polarity.
-// Source: Sine 60 Hz, Low=2.000 V, High=3.000 V, Phase=0.
-constexpr float INPUT_CAL_GAIN = 1.7803975f;
-constexpr float INPUT_CAL_OFFSET_V = -1.1079215f;
+// Source: Sine 60 Hz, Low=1.500 V, High=3.000 V, Phase=0.
+constexpr float INPUT_CAL_GAIN = 0.9412289f;
+constexpr float INPUT_CAL_OFFSET_V = -0.0512069f;
 
 // Keep true for the local SDG1032X calibration test. In this mode WiFi/MQTT
 // are disabled and no current value is published as if it were production.
 constexpr bool CALIBRATION_MODE = true;
-constexpr float CALIBRATION_LOW_V = 2.000f;
+constexpr float CALIBRATION_LOW_V = 1.500f;
 constexpr float CALIBRATION_HIGH_V = 3.000f;
 constexpr float CALIBRATION_FREQUENCY_HZ = 60.0f;
 constexpr uint32_t CALIBRATION_REPORT_INTERVAL_MS = 1000;
