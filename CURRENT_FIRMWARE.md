@@ -9,7 +9,9 @@ firmware/SCADA_ADC_MQTT/SCADA_ADC_MQTT.ino
 La ruta de datos es:
 
 ```text
-SCT-013 -> burden y acondicionamiento -> ADS1263 IN1-IN0 -> ESP32 -> MQTT -> servidor Ubuntu
+SCT-013 -> burden y acondicionamiento -> ADS1263 IN1-IN0
+Sensor de voltaje aislado -> ADS1263 IN3-IN2
+ADS1263 -> ESP32 -> MQTT -> servidor Ubuntu
 ```
 
 ## Preparacion
@@ -38,6 +40,11 @@ Campos principales:
 - `frecuencia_hz`: frecuencia detectada.
 - `valido`: indica que no existen rieles, referencia flotante ni frecuencia incompatible.
 - `cargando`: corriente valida igual o superior a 1 A.
+- `voltaje_sensor_rms_v`: RMS de la salida acondicionada medida en IN3-IN2.
+- `voltaje_rms_v`: RMS de red; permanece `null` hasta calibrar el sensor.
+- `voltaje_bias_v`, `voltaje_vpp_v`, `voltaje_frecuencia_hz`: diagnostico del canal de voltaje.
+- `voltaje_valido`: indica que IN3-IN2 no esta saturado y su frecuencia es compatible.
+- `voltaje_calibrado`: confirma si ya se habilito la conversion a voltios de red.
 - `secuencia`: contador monotono desde el ultimo arranque.
 - `timestamp_unix`: cero hasta que NTP sincroniza.
 
@@ -61,7 +68,18 @@ Las publicaciones periodicas usan QoS 0 sobre TCP para mantener una sesion estab
 | AVDD | 5V |
 | AVSS/GND | GND |
 
-Se mide diferencialmente `IN1` respecto a `IN0` (`IN1-IN0`). Una tension diferencial negativa es valida y ya no se interpreta como saturacion. El firmware conserva la medicion de AVDD-AVSS para determinar su escala real.
+La corriente se mide diferencialmente en `IN1-IN0`. El voltaje acondicionado se mide en `IN3-IN2`, con IN3 positivo e IN2 negativo. Una tension diferencial negativa es valida y no se interpreta como saturacion. El firmware conserva la medicion de AVDD-AVSS para determinar su escala real. Nunca se conecta la red electrica directamente a una entrada del ADS1263: el canal IN3-IN2 requiere aislamiento y acondicionamiento.
+
+## Calibracion del canal de voltaje
+
+La ganancia de un modulo de voltaje ajustable depende del circuito y de la posicion de su potenciometro. La version inicial publica `voltaje_sensor_rms_v`, pero mantiene `voltaje_rms_v=null` y `voltaje_calibrado=false` para no reportar un valor de red inventado.
+
+Con una fuente AC segura o durante una ventana de trabajo autorizada, se compara `voltaje_sensor_rms_v` contra un multimetro True RMS. Entonces se configura:
+
+```text
+VOLTAGE_MAINS_PER_SENSOR_V = voltaje_referencia_rms / voltaje_sensor_rms_v
+VOLTAGE_SENSOR_CALIBRATED = true
+```
 
 ## Recalibracion IN1-IN0
 

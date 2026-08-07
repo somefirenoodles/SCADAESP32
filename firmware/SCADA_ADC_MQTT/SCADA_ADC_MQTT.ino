@@ -2,8 +2,8 @@
   SCADA EV: SCT-013 + ADS1263 + ESP32 + MQTT
 
   Analog input:
-    ADS1263 IN1 positive input
-    ADS1263 IN0 negative input
+    Current: ADS1263 IN1 positive, IN0 negative
+    Voltage: ADS1263 IN3 positive, IN2 negative
 
   ADS1263 SPI:
     CS=27, SCLK=18, MISO/DOUT=19, MOSI/DIN=23, DRDY=25, RESET=26
@@ -66,8 +66,12 @@ constexpr uint8_t MODE2_PGA_GAIN1_2400_SPS = 0x0A;
 constexpr uint8_t REFMUX_INTERNAL_2V5 = 0x00;
 constexpr uint8_t REFMUX_AVDD_AVSS = 0x24;
 constexpr uint8_t INPMUX_IN1_IN0 = 0x10;
+constexpr uint8_t INPMUX_IN3_IN2 = 0x32;
 constexpr uint8_t INPMUX_ANALOG_SUPPLY_MONITOR = 0xCC;
 }  // namespace Ads
+
+static_assert(Ads::INPMUX_IN3_IN2 == 0x32,
+              "ADS1263 INPMUX must select IN3 positive and IN2 negative");
 
 constexpr float NOMINAL_ANALOG_SUPPLY_V = 5.000f;
 constexpr float INTERNAL_REFERENCE_V = 2.500f;
@@ -91,6 +95,13 @@ constexpr float BURDEN_OHM = 22.0f;
 constexpr float CURRENT_CAL_GAIN = 1.0f;
 constexpr float CHARGING_THRESHOLD_A = 1.0f;
 
+// Combined scale of the isolated voltage sensor and its conditioning circuit.
+// Calibrate against a trusted AC meter before setting this flag to true:
+//   VOLTAGE_MAINS_PER_SENSOR_V = reference_mains_rms / sensor_rms
+// Never connect mains directly to IN2/IN3.
+constexpr bool VOLTAGE_SENSOR_CALIBRATED = false;
+constexpr float VOLTAGE_MAINS_PER_SENSOR_V = 1.0f;
+
 constexpr size_t WINDOW_SAMPLES = 1200;
 constexpr uint32_t DRDY_TIMEOUT_US = 100000;
 constexpr float MIN_FREQUENCY_RMS_V = 0.005f;
@@ -99,7 +110,7 @@ constexpr uint32_t WIFI_RETRY_MS = 10000;
 constexpr uint32_t MQTT_RETRY_MS = 5000;
 constexpr uint16_t MQTT_KEEPALIVE_S = 60;
 constexpr uint8_t MQTT_PUBLISH_QOS = 0;
-constexpr size_t MQTT_PAYLOAD_SIZE = 384;
+constexpr size_t MQTT_PAYLOAD_SIZE = 640;
 constexpr size_t MQTT_QUEUE_SIZE = 16;
 
 SPISettings adsSpi(Ads::SPI_HZ, MSBFIRST, SPI_MODE1);
@@ -242,8 +253,13 @@ float rawToVolts(int32_t raw, float referenceV) {
                             2147483648.0);
 }
 
+float applyLinearCalibration(float measuredV, float gain, float offsetV) {
+  return measuredV * gain + offsetV;
+}
+
 float calibrateInputVoltage(float measuredV) {
-  return measuredV * INPUT_CAL_GAIN + INPUT_CAL_OFFSET_V;
+  return applyLinearCalibration(measuredV, INPUT_CAL_GAIN,
+                                INPUT_CAL_OFFSET_V);
 }
 
 bool selectConversion(uint8_t mode2, uint8_t refmux, uint8_t inpmux) {
@@ -409,7 +425,13 @@ bool runMathSelfTest() {
   return ok;
 }
 
-bool captureWindow(Metrics& metrics, Metrics& rawMetrics) {
+bool captureWindow(uint8_t inpmux, float gain, float offsetV,
+                   Metrics& metrics, Metrics& rawMetrics) {
+  if (!selectConversion(Ads::MODE2_PGA_BYPASS_2400_SPS,
+                        Ads::REFMUX_AVDD_AVSS, inpmux)) {
+    return false;
+  }
+
   size_t captured = 0;
   const uint32_t startedUs = micros();
   uint32_t firstSampleUs = 0;
@@ -436,7 +458,7 @@ bool captureWindow(Metrics& metrics, Metrics& rawMetrics) {
       static_cast<uint32_t>(lastSampleUs - firstSampleUs);
   rawMetrics = calculateMetrics(sampleBuffer, WINDOW_SAMPLES, elapsedUs);
   for (float& sample : sampleBuffer) {
-    sample = calibrateInputVoltage(sample);
+    sample = applyLinearCalibration(sample, gain, offsetV);
   }
   metrics = calculateMetrics(sampleBuffer, WINDOW_SAMPLES, elapsedUs);
   return true;
@@ -790,25 +812,50 @@ void maintainConnections() {
   }
 }
 
-void buildAndQueuePayload(const Metrics& m, const Metrics& raw) {
-  const bool valid = metricsAreValid(m, raw);
-  const float currentRmsA = valid ? voltageRmsToCurrent(m.rmsAcV) : 0.0f;
-  const bool charging = valid && currentRmsA >= CHARGING_THRESHOLD_A;
+void buildAndQueuePayload(const Metrics& current,
+                          const Metrics& rawCurrent,
+                          const Metrics& voltage,
+                          const Metrics& rawVoltage) {
+  const bool currentValid = metricsAreValid(current, rawCurrent);
+  const bool voltageValid = metricsAreValid(voltage, rawVoltage);
+  const float currentRmsA =
+      currentValid ? voltageRmsToCurrent(current.rmsAcV) : 0.0f;
+  const bool charging =
+      currentValid && currentRmsA >= CHARGING_THRESHOLD_A;
+  const bool mainsVoltageValid =
+      voltageValid && VOLTAGE_SENSOR_CALIBRATED;
+  char mainsVoltageRms[24];
+  if (mainsVoltageValid) {
+    snprintf(mainsVoltageRms, sizeof(mainsVoltageRms), "%.3f",
+             voltage.rmsAcV * VOLTAGE_MAINS_PER_SENSOR_V);
+  } else {
+    strlcpy(mainsVoltageRms, "null", sizeof(mainsVoltageRms));
+  }
   const time_t now = time(nullptr);
   char payload[MQTT_PAYLOAD_SIZE];
 
   const int written = snprintf(
       payload, sizeof(payload),
-      "{\"version\":1,\"dispositivo\":\"%s\",\"secuencia\":%lu,"
+      "{\"version\":2,\"dispositivo\":\"%s\",\"secuencia\":%lu,"
       "\"timestamp_unix\":%lld,\"corriente_rms_a\":%.4f,"
       "\"senal_rms_v\":%.6f,\"bias_v\":%.6f,\"vpp_v\":%.6f,"
       "\"frecuencia_hz\":%.3f,\"muestreo_sps\":%.1f,"
-      "\"valido\":%s,\"cargando\":%s,\"cola\":%u,"
+      "\"valido\":%s,\"cargando\":%s,"
+      "\"voltaje_rms_v\":%s,\"voltaje_sensor_rms_v\":%.6f,"
+      "\"voltaje_bias_v\":%.6f,\"voltaje_vpp_v\":%.6f,"
+      "\"voltaje_frecuencia_hz\":%.3f,"
+      "\"voltaje_muestreo_sps\":%.1f,\"voltaje_valido\":%s,"
+      "\"voltaje_calibrado\":%s,\"cola\":%u,"
       "\"descartados\":%lu,\"uptime_ms\":%lu}",
       SCADA_DEVICE_ID, static_cast<unsigned long>(++sequenceNumber),
       static_cast<long long>(now > 1700000000 ? now : 0), currentRmsA,
-      m.rmsAcV, m.meanV, m.vppV, m.frequencyHz, m.sampleRate,
-      valid ? "true" : "false", charging ? "true" : "false",
+      current.rmsAcV, current.meanV, current.vppV,
+      current.frequencyHz, current.sampleRate,
+      currentValid ? "true" : "false", charging ? "true" : "false",
+      mainsVoltageRms, voltage.rmsAcV, voltage.meanV, voltage.vppV,
+      voltage.frequencyHz, voltage.sampleRate,
+      voltageValid ? "true" : "false",
+      VOLTAGE_SENSOR_CALIBRATED ? "true" : "false",
       static_cast<unsigned int>(queueCount),
       static_cast<unsigned long>(droppedMessages),
       static_cast<unsigned long>(millis()));
@@ -824,8 +871,8 @@ void buildAndQueuePayload(const Metrics& m, const Metrics& raw) {
 void setup() {
   Serial.begin(115200);
   delay(800);
-  Serial.println("\n[BOOT] SCADA SCT-013 + ADS1263");
-  Serial.println("[ADC] Entrada diferencial IN1-IN0");
+  Serial.println("\n[BOOT] SCADA corriente + voltaje + ADS1263");
+  Serial.println("[ADC] Corriente IN1-IN0 | Voltaje IN3-IN2");
 
   pinMode(Pins::CS, OUTPUT);
   pinMode(Pins::RESET, OUTPUT);
@@ -876,13 +923,26 @@ void loop() {
     maintainConnections();
   }
 
-  Metrics metrics;
-  Metrics rawMetrics;
-  if (!captureWindow(metrics, rawMetrics)) {
-    Serial.println("[ADC] Capture failed.");
+  Metrics currentMetrics;
+  Metrics rawCurrentMetrics;
+  if (!captureWindow(Ads::INPMUX_IN1_IN0, INPUT_CAL_GAIN,
+                     INPUT_CAL_OFFSET_V, currentMetrics,
+                     rawCurrentMetrics)) {
+    Serial.println("[ADC] Current capture failed.");
     if (!CALIBRATION_MODE) {
       maintainConnections();
     }
+    delay(100);
+    return;
+  }
+
+  Metrics voltageMetrics{};
+  Metrics rawVoltageMetrics{};
+  if (!CALIBRATION_MODE &&
+      !captureWindow(Ads::INPMUX_IN3_IN2, 1.0f, 0.0f,
+                     voltageMetrics, rawVoltageMetrics)) {
+    Serial.println("[ADC] Voltage capture failed.");
+    maintainConnections();
     delay(100);
     return;
   }
@@ -894,9 +954,10 @@ void loop() {
   if (static_cast<uint32_t>(now - lastPublishMs) >= interval) {
     lastPublishMs = now;
     if (CALIBRATION_MODE) {
-      printCalibrationReport(rawMetrics, metrics);
+      printCalibrationReport(rawCurrentMetrics, currentMetrics);
     } else {
-      buildAndQueuePayload(metrics, rawMetrics);
+      buildAndQueuePayload(currentMetrics, rawCurrentMetrics,
+                           voltageMetrics, rawVoltageMetrics);
     }
   }
 
