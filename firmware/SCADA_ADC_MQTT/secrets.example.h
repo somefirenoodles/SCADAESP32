@@ -5,7 +5,7 @@
 #define SCADA_WIFI_PASSWORD "CHANGE_ME"
 
 // Private IPv4 or DNS name of the Ubuntu Mosquitto server.
-#define SCADA_MQTT_HOST "192.168.1.10"
+#define SCADA_MQTT_HOST "192.168.18.215"
 #define SCADA_MQTT_PORT 1883
 #define SCADA_MQTT_USERNAME "br1"
 #define SCADA_MQTT_PASSWORD "CHANGE_ME"

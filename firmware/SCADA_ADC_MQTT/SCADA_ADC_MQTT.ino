@@ -2,8 +2,8 @@
   SCADA EV: SCT-013 + ADS1263 + ESP32 + MQTT
 
   Analog input:
-    ADS1263 IN9 positive input
-    ADS1263 COM negative input (COM-AVSS jumper installed)
+    Current: ADS1263 IN1 positive, IN0 negative
+    Voltage: ADS1263 IN3 positive, IN2 negative
 
   ADS1263 SPI:
     CS=27, SCLK=18, MISO/DOUT=19, MOSI/DIN=23, DRDY=25, RESET=26
@@ -65,16 +65,29 @@ constexpr uint8_t MODE2_PGA_BYPASS_2400_SPS = 0x8A;
 constexpr uint8_t MODE2_PGA_GAIN1_2400_SPS = 0x0A;
 constexpr uint8_t REFMUX_INTERNAL_2V5 = 0x00;
 constexpr uint8_t REFMUX_AVDD_AVSS = 0x24;
-constexpr uint8_t INPMUX_IN9_COM = 0x9A;
+constexpr uint8_t INPMUX_IN1_IN0 = 0x10;
+constexpr uint8_t INPMUX_IN3_IN2 = 0x32;
 constexpr uint8_t INPMUX_ANALOG_SUPPLY_MONITOR = 0xCC;
 }  // namespace Ads
+
+static_assert(Ads::INPMUX_IN3_IN2 == 0x32,
+              "ADS1263 INPMUX must select IN3 positive and IN2 negative");
 
 constexpr float NOMINAL_ANALOG_SUPPLY_V = 5.000f;
 constexpr float INTERNAL_REFERENCE_V = 2.500f;
 
-// System calibration obtained with SDG1032X, 2.000 V and 3.000 V endpoints.
-constexpr float INPUT_CAL_GAIN = 0.8995233f;
-constexpr float INPUT_CAL_OFFSET_V = -0.0390393f;
+// IN1-IN0 calibration obtained with the SDG1032X after correcting polarity.
+// Source: Sine 60 Hz, Low=1.500 V, High=3.000 V, Phase=0.
+constexpr float INPUT_CAL_GAIN = 0.9412289f;
+constexpr float INPUT_CAL_OFFSET_V = -0.0512069f;
+
+// Keep true for the local SDG1032X calibration test. In this mode WiFi/MQTT
+// are disabled and no current value is published as if it were production.
+constexpr bool CALIBRATION_MODE = false;
+constexpr float CALIBRATION_LOW_V = 1.500f;
+constexpr float CALIBRATION_HIGH_V = 3.000f;
+constexpr float CALIBRATION_FREQUENCY_HZ = 60.0f;
+constexpr uint32_t CALIBRATION_REPORT_INTERVAL_MS = 1000;
 
 constexpr float SCT_PRIMARY_A = 100.0f;
 constexpr float SCT_SECONDARY_A = 0.050f;
@@ -82,17 +95,22 @@ constexpr float BURDEN_OHM = 22.0f;
 constexpr float CURRENT_CAL_GAIN = 1.0f;
 constexpr float CHARGING_THRESHOLD_A = 1.0f;
 
+// Combined scale of the isolated voltage sensor and its conditioning circuit.
+// Calibrate against a trusted AC meter before setting this flag to true:
+//   VOLTAGE_MAINS_PER_SENSOR_V = reference_mains_rms / sensor_rms
+// Never connect mains directly to IN2/IN3.
+constexpr bool VOLTAGE_SENSOR_CALIBRATED = false;
+constexpr float VOLTAGE_MAINS_PER_SENSOR_V = 1.0f;
+
 constexpr size_t WINDOW_SAMPLES = 1200;
 constexpr uint32_t DRDY_TIMEOUT_US = 100000;
 constexpr float MIN_FREQUENCY_RMS_V = 0.005f;
-constexpr float COMMON_MODE_MIN_V = 2.0f;
-constexpr float COMMON_MODE_MAX_V = 3.0f;
-
 constexpr uint32_t PUBLISH_INTERVAL_MS = 5000;
 constexpr uint32_t WIFI_RETRY_MS = 10000;
 constexpr uint32_t MQTT_RETRY_MS = 5000;
 constexpr uint16_t MQTT_KEEPALIVE_S = 60;
-constexpr size_t MQTT_PAYLOAD_SIZE = 384;
+constexpr uint8_t MQTT_PUBLISH_QOS = 0;
+constexpr size_t MQTT_PAYLOAD_SIZE = 640;
 constexpr size_t MQTT_QUEUE_SIZE = 16;
 
 SPISettings adsSpi(Ads::SPI_HZ, MSBFIRST, SPI_MODE1);
@@ -235,8 +253,13 @@ float rawToVolts(int32_t raw, float referenceV) {
                             2147483648.0);
 }
 
+float applyLinearCalibration(float measuredV, float gain, float offsetV) {
+  return measuredV * gain + offsetV;
+}
+
 float calibrateInputVoltage(float measuredV) {
-  return measuredV * INPUT_CAL_GAIN + INPUT_CAL_OFFSET_V;
+  return applyLinearCalibration(measuredV, INPUT_CAL_GAIN,
+                                INPUT_CAL_OFFSET_V);
 }
 
 bool selectConversion(uint8_t mode2, uint8_t refmux, uint8_t inpmux) {
@@ -268,7 +291,7 @@ bool configureAds1263() {
   writeRegister(Ads::REG_MODE1, Ads::MODE1_FIR);
   writeRegister(Ads::REG_MODE2, Ads::MODE2_PGA_BYPASS_2400_SPS);
   writeRegister(Ads::REG_REFMUX, Ads::REFMUX_AVDD_AVSS);
-  writeRegister(Ads::REG_INPMUX, Ads::INPMUX_IN9_COM);
+  writeRegister(Ads::REG_INPMUX, Ads::INPMUX_IN1_IN0);
 
   bool ok = true;
   ok &= verifyRegister("POWER", Ads::REG_POWER, Ads::POWER_INTREF_ON);
@@ -279,7 +302,7 @@ bool configureAds1263() {
   ok &= verifyRegister("MODE2", Ads::REG_MODE2,
                        Ads::MODE2_PGA_BYPASS_2400_SPS);
   ok &= verifyRegister("REFMUX", Ads::REG_REFMUX, Ads::REFMUX_AVDD_AVSS);
-  ok &= verifyRegister("INPMUX", Ads::REG_INPMUX, Ads::INPMUX_IN9_COM);
+  ok &= verifyRegister("INPMUX", Ads::REG_INPMUX, Ads::INPMUX_IN1_IN0);
   if (!ok) {
     return false;
   }
@@ -315,7 +338,7 @@ bool measureAnalogSupply(float& supplyV) {
 
   const bool restored =
       selectConversion(Ads::MODE2_PGA_BYPASS_2400_SPS,
-                       Ads::REFMUX_AVDD_AVSS, Ads::INPMUX_IN9_COM);
+                       Ads::REFMUX_AVDD_AVSS, Ads::INPMUX_IN1_IN0);
   return ok && restored;
 }
 
@@ -402,7 +425,13 @@ bool runMathSelfTest() {
   return ok;
 }
 
-bool captureWindow(Metrics& metrics) {
+bool captureWindow(uint8_t inpmux, float gain, float offsetV,
+                   Metrics& metrics, Metrics& rawMetrics) {
+  if (!selectConversion(Ads::MODE2_PGA_BYPASS_2400_SPS,
+                        Ads::REFMUX_AVDD_AVSS, inpmux)) {
+    return false;
+  }
+
   size_t captured = 0;
   const uint32_t startedUs = micros();
   uint32_t firstSampleUs = 0;
@@ -422,13 +451,16 @@ bool captureWindow(Metrics& metrics) {
       firstSampleUs = now;
     }
     lastSampleUs = now;
-    sampleBuffer[captured++] =
-        calibrateInputVoltage(rawToVolts(raw, adcFullScaleV));
+    sampleBuffer[captured++] = rawToVolts(raw, adcFullScaleV);
   }
 
-  metrics = calculateMetrics(
-      sampleBuffer, WINDOW_SAMPLES,
-      static_cast<uint32_t>(lastSampleUs - firstSampleUs));
+  const uint32_t elapsedUs =
+      static_cast<uint32_t>(lastSampleUs - firstSampleUs);
+  rawMetrics = calculateMetrics(sampleBuffer, WINDOW_SAMPLES, elapsedUs);
+  for (float& sample : sampleBuffer) {
+    sample = applyLinearCalibration(sample, gain, offsetV);
+  }
+  metrics = calculateMetrics(sampleBuffer, WINDOW_SAMPLES, elapsedUs);
   return true;
 }
 
@@ -437,16 +469,60 @@ float voltageRmsToCurrent(float rmsV) {
   return rmsV * transformerRatio / BURDEN_OHM * CURRENT_CAL_GAIN;
 }
 
-bool metricsAreValid(const Metrics& m) {
-  const bool lowRail = m.minV < calibrateInputVoltage(0.05f);
-  const bool highRail =
-      m.maxV > calibrateInputVoltage(adcFullScaleV - 0.05f);
-  const bool commonModeOk =
-      m.meanV >= COMMON_MODE_MIN_V && m.meanV <= COMMON_MODE_MAX_V;
+bool metricsAreValid(const Metrics& m, const Metrics& raw) {
+  // IN1-IN0 is bipolar: a negative differential voltage is valid. Only a
+  // value close to either differential full-scale limit indicates a rail.
+  const bool lowRail = raw.minV < -(adcFullScaleV - 0.05f);
+  const bool highRail = raw.maxV > (adcFullScaleV - 0.05f);
   const bool frequencyOk =
       m.rmsAcV < MIN_FREQUENCY_RMS_V ||
       (m.frequencyHz >= 45.0f && m.frequencyHz <= 65.0f);
-  return !lowRail && !highRail && commonModeOk && frequencyOk;
+  const bool finite = isfinite(m.meanV) && isfinite(m.rmsAcV) &&
+                      isfinite(m.frequencyHz);
+  return !lowRail && !highRail && frequencyOk && finite;
+}
+
+void printCalibrationReport(const Metrics& raw, const Metrics& calibrated) {
+  Serial.printf(
+      "[RAW IN1-IN0] media=%.6f V | AC_RMS=%.6f V | Vpp=%.6f V | "
+      "min=%.6f V | max=%.6f V | f=%.2f Hz | Fs=%.1f SPS\n",
+      raw.meanV, raw.rmsAcV, raw.vppV, raw.minV, raw.maxV,
+      raw.frequencyHz, raw.sampleRate);
+  Serial.printf(
+      "[CAL ACTUAL] media=%.6f V | AC_RMS=%.6f V | Vpp=%.6f V | "
+      "min=%.6f V | max=%.6f V\n",
+      calibrated.meanV, calibrated.rmsAcV, calibrated.vppV,
+      calibrated.minV, calibrated.maxV);
+
+  const float expectedMean =
+      (CALIBRATION_HIGH_V + CALIBRATION_LOW_V) * 0.5f;
+  const float expectedPeak =
+      (CALIBRATION_HIGH_V - CALIBRATION_LOW_V) * 0.5f;
+  const float measuredPeak = raw.rmsAcV * sqrtf(2.0f);
+  const float sineShape =
+      raw.rmsAcV > 0.0f
+          ? raw.vppV / (2.0f * sqrtf(2.0f) * raw.rmsAcV)
+          : 0.0f;
+  const bool sineIsValid =
+      measuredPeak > 0.05f &&
+      fabsf(raw.frequencyHz - CALIBRATION_FREQUENCY_HZ) <= 1.0f &&
+      sineShape >= 0.90f && sineShape <= 1.10f;
+
+  if (!sineIsValid) {
+    Serial.printf(
+        "[CAL ESPERA] Aplique seno %.1f Hz, Low=%.3f V, High=%.3f V, "
+        "Phase=0 (shape=%.3f).\n",
+        CALIBRATION_FREQUENCY_HZ, CALIBRATION_LOW_V,
+        CALIBRATION_HIGH_V, sineShape);
+    return;
+  }
+
+  const float suggestedGain = expectedPeak / measuredPeak;
+  const float suggestedOffset = expectedMean - suggestedGain * raw.meanV;
+  Serial.printf(
+      "[CONST SUGERIDAS] INPUT_CAL_GAIN=%.7ff | "
+      "INPUT_CAL_OFFSET_V=%.7ff\n",
+      suggestedGain, suggestedOffset);
 }
 
 size_t encodeRemainingLength(size_t length, uint8_t out[4]) {
@@ -486,6 +562,59 @@ bool sendMqttPacket(uint8_t header, const uint8_t* body, size_t bodyLength) {
       (bodyLength > 0 && mqttSocket->write(body, bodyLength) != bodyLength)) {
     mqttSocket->stop();
     return false;
+  }
+  lastMqttActivityMs = millis();
+  return true;
+}
+
+bool readMqttByte(uint8_t& value, uint32_t deadlineMs) {
+  while (static_cast<int32_t>(millis() - deadlineMs) < 0) {
+    if (mqttSocket != nullptr && mqttSocket->available() > 0) {
+      const int byteRead = mqttSocket->read();
+      if (byteRead >= 0) {
+        value = static_cast<uint8_t>(byteRead);
+        return true;
+      }
+    }
+    if (mqttSocket == nullptr || !mqttSocket->connected()) {
+      return false;
+    }
+    delay(1);
+  }
+  return false;
+}
+
+bool readMqttPacket(uint8_t& header, uint8_t* body, size_t bodyCapacity,
+                    size_t& bodyLength, uint32_t timeoutMs) {
+  const uint32_t deadlineMs = millis() + timeoutMs;
+  if (!readMqttByte(header, deadlineMs)) {
+    return false;
+  }
+
+  bodyLength = 0;
+  size_t multiplier = 1;
+  for (uint8_t encodedBytes = 0; encodedBytes < 4; ++encodedBytes) {
+    uint8_t encoded = 0;
+    if (!readMqttByte(encoded, deadlineMs)) {
+      return false;
+    }
+    bodyLength += static_cast<size_t>(encoded & 0x7F) * multiplier;
+    if ((encoded & 0x80) == 0) {
+      break;
+    }
+    if (encodedBytes == 3) {
+      return false;
+    }
+    multiplier *= 128;
+  }
+
+  if (bodyLength > bodyCapacity) {
+    return false;
+  }
+  for (size_t index = 0; index < bodyLength; ++index) {
+    if (!readMqttByte(body[index], deadlineMs)) {
+      return false;
+    }
   }
   lastMqttActivityMs = millis();
   return true;
@@ -551,10 +680,12 @@ bool mqttConnect() {
     return false;
   }
 
-  mqttSocket->setTimeout(3000);
+  uint8_t connAckHeader = 0;
   uint8_t connAck[4];
-  if (mqttSocket->readBytes(connAck, sizeof(connAck)) != sizeof(connAck) ||
-      connAck[0] != 0x20 || connAck[1] != 0x02 || connAck[3] != 0x00) {
+  size_t connAckLength = 0;
+  if (!readMqttPacket(connAckHeader, connAck, sizeof(connAck),
+                      connAckLength, 3000) ||
+      connAckHeader != 0x20 || connAckLength != 2 || connAck[1] != 0x00) {
     Serial.println("[MQTT] Broker rejected or did not answer CONNECT.");
     mqttSocket->stop();
     return false;
@@ -572,34 +703,56 @@ bool mqttPublish(const char* payload) {
   if (!appendMqttString(body, sizeof(body), position, SCADA_MQTT_TOPIC)) {
     return false;
   }
-  ++mqttPacketId;
-  if (mqttPacketId == 0) {
+  if (MQTT_PUBLISH_QOS == 1) {
     ++mqttPacketId;
+    if (mqttPacketId == 0) {
+      ++mqttPacketId;
+    }
+    body[position++] = static_cast<uint8_t>(mqttPacketId >> 8);
+    body[position++] = static_cast<uint8_t>(mqttPacketId & 0xFF);
   }
-  body[position++] = static_cast<uint8_t>(mqttPacketId >> 8);
-  body[position++] = static_cast<uint8_t>(mqttPacketId & 0xFF);
   const size_t payloadLength = strlen(payload);
   if (position + payloadLength > sizeof(body)) {
     return false;
   }
   memcpy(body + position, payload, payloadLength);
   position += payloadLength;
-  if (!sendMqttPacket(0x32, body, position)) {
+  const uint8_t publishHeader = MQTT_PUBLISH_QOS == 1 ? 0x32 : 0x30;
+  if (!sendMqttPacket(publishHeader, body, position)) {
     return false;
+  }
+  if (MQTT_PUBLISH_QOS == 0) {
+    return true;
   }
 
-  mqttSocket->setTimeout(2000);
-  uint8_t pubAck[4];
-  if (mqttSocket->readBytes(pubAck, sizeof(pubAck)) != sizeof(pubAck) ||
-      pubAck[0] != 0x40 || pubAck[1] != 0x02 ||
-      pubAck[2] != static_cast<uint8_t>(mqttPacketId >> 8) ||
-      pubAck[3] != static_cast<uint8_t>(mqttPacketId & 0xFF)) {
-    Serial.println("[MQTT] Missing or invalid PUBACK; retaining message.");
-    mqttSocket->stop();
-    return false;
+  const uint32_t ackDeadlineMs = millis() + 3000;
+  while (static_cast<int32_t>(millis() - ackDeadlineMs) < 0) {
+    uint8_t responseHeader = 0;
+    uint8_t responseBody[8];
+    size_t responseLength = 0;
+    const uint32_t remainingMs = ackDeadlineMs - millis();
+    if (!readMqttPacket(responseHeader, responseBody, sizeof(responseBody),
+                        responseLength, remainingMs)) {
+      break;
+    }
+
+    const uint8_t packetType = responseHeader & 0xF0;
+    if (packetType == 0xD0 && responseLength == 0) {
+      continue;
+    }
+    if (packetType == 0x40 && responseLength == 2 &&
+        responseBody[0] == static_cast<uint8_t>(mqttPacketId >> 8) &&
+        responseBody[1] == static_cast<uint8_t>(mqttPacketId & 0xFF)) {
+      lastMqttActivityMs = millis();
+      return true;
+    }
+    Serial.printf("[MQTT] Unexpected packet type=0x%02X length=%u.\n",
+                  packetType, static_cast<unsigned int>(responseLength));
   }
-  lastMqttActivityMs = millis();
-  return true;
+
+  Serial.println("[MQTT] Missing or invalid PUBACK; retaining message.");
+  mqttSocket->stop();
+  return false;
 }
 
 void enqueueMessage(const char* payload) {
@@ -659,25 +812,50 @@ void maintainConnections() {
   }
 }
 
-void buildAndQueuePayload(const Metrics& m) {
-  const bool valid = metricsAreValid(m);
-  const float currentRmsA = valid ? voltageRmsToCurrent(m.rmsAcV) : 0.0f;
-  const bool charging = valid && currentRmsA >= CHARGING_THRESHOLD_A;
+void buildAndQueuePayload(const Metrics& current,
+                          const Metrics& rawCurrent,
+                          const Metrics& voltage,
+                          const Metrics& rawVoltage) {
+  const bool currentValid = metricsAreValid(current, rawCurrent);
+  const bool voltageValid = metricsAreValid(voltage, rawVoltage);
+  const float currentRmsA =
+      currentValid ? voltageRmsToCurrent(current.rmsAcV) : 0.0f;
+  const bool charging =
+      currentValid && currentRmsA >= CHARGING_THRESHOLD_A;
+  const bool mainsVoltageValid =
+      voltageValid && VOLTAGE_SENSOR_CALIBRATED;
+  char mainsVoltageRms[24];
+  if (mainsVoltageValid) {
+    snprintf(mainsVoltageRms, sizeof(mainsVoltageRms), "%.3f",
+             voltage.rmsAcV * VOLTAGE_MAINS_PER_SENSOR_V);
+  } else {
+    strlcpy(mainsVoltageRms, "null", sizeof(mainsVoltageRms));
+  }
   const time_t now = time(nullptr);
   char payload[MQTT_PAYLOAD_SIZE];
 
   const int written = snprintf(
       payload, sizeof(payload),
-      "{\"version\":1,\"dispositivo\":\"%s\",\"secuencia\":%lu,"
+      "{\"version\":2,\"dispositivo\":\"%s\",\"secuencia\":%lu,"
       "\"timestamp_unix\":%lld,\"corriente_rms_a\":%.4f,"
       "\"senal_rms_v\":%.6f,\"bias_v\":%.6f,\"vpp_v\":%.6f,"
       "\"frecuencia_hz\":%.3f,\"muestreo_sps\":%.1f,"
-      "\"valido\":%s,\"cargando\":%s,\"cola\":%u,"
+      "\"valido\":%s,\"cargando\":%s,"
+      "\"voltaje_rms_v\":%s,\"voltaje_sensor_rms_v\":%.6f,"
+      "\"voltaje_bias_v\":%.6f,\"voltaje_vpp_v\":%.6f,"
+      "\"voltaje_frecuencia_hz\":%.3f,"
+      "\"voltaje_muestreo_sps\":%.1f,\"voltaje_valido\":%s,"
+      "\"voltaje_calibrado\":%s,\"cola\":%u,"
       "\"descartados\":%lu,\"uptime_ms\":%lu}",
       SCADA_DEVICE_ID, static_cast<unsigned long>(++sequenceNumber),
       static_cast<long long>(now > 1700000000 ? now : 0), currentRmsA,
-      m.rmsAcV, m.meanV, m.vppV, m.frequencyHz, m.sampleRate,
-      valid ? "true" : "false", charging ? "true" : "false",
+      current.rmsAcV, current.meanV, current.vppV,
+      current.frequencyHz, current.sampleRate,
+      currentValid ? "true" : "false", charging ? "true" : "false",
+      mainsVoltageRms, voltage.rmsAcV, voltage.meanV, voltage.vppV,
+      voltage.frequencyHz, voltage.sampleRate,
+      voltageValid ? "true" : "false",
+      VOLTAGE_SENSOR_CALIBRATED ? "true" : "false",
       static_cast<unsigned int>(queueCount),
       static_cast<unsigned long>(droppedMessages),
       static_cast<unsigned long>(millis()));
@@ -693,7 +871,8 @@ void buildAndQueuePayload(const Metrics& m) {
 void setup() {
   Serial.begin(115200);
   delay(800);
-  Serial.println("\nSCADA SCT-013 + ADS1263 + MQTT");
+  Serial.println("\n[BOOT] SCADA corriente + voltaje + ADS1263");
+  Serial.println("[ADC] Corriente IN1-IN0 | Voltaje IN3-IN2");
 
   pinMode(Pins::CS, OUTPUT);
   pinMode(Pins::RESET, OUTPUT);
@@ -722,30 +901,68 @@ void setup() {
     Serial.println("[ADC] Supply monitor failed; using 5.000 V.");
   }
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(SCADA_WIFI_SSID, SCADA_WIFI_PASSWORD);
-  lastWifiAttemptMs = millis();
-  configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
+  if (CALIBRATION_MODE) {
+    WiFi.mode(WIFI_OFF);
+    Serial.println(
+        "[MODE] CALIBRACION LOCAL: WiFi y MQTT desactivados.");
+    Serial.printf(
+        "[GEN] Sine %.1f Hz | High=%.3f V | Low=%.3f V | Phase=0\n",
+        CALIBRATION_FREQUENCY_HZ, CALIBRATION_HIGH_V,
+        CALIBRATION_LOW_V);
+  } else {
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(SCADA_WIFI_SSID, SCADA_WIFI_PASSWORD);
+    lastWifiAttemptMs = millis();
+    configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
+  }
 }
 
 void loop() {
-  maintainConnections();
+  if (!CALIBRATION_MODE) {
+    maintainConnections();
+  }
 
-  Metrics metrics;
-  if (!captureWindow(metrics)) {
-    Serial.println("[ADC] Capture failed.");
+  Metrics currentMetrics;
+  Metrics rawCurrentMetrics;
+  if (!captureWindow(Ads::INPMUX_IN1_IN0, INPUT_CAL_GAIN,
+                     INPUT_CAL_OFFSET_V, currentMetrics,
+                     rawCurrentMetrics)) {
+    Serial.println("[ADC] Current capture failed.");
+    if (!CALIBRATION_MODE) {
+      maintainConnections();
+    }
+    delay(100);
+    return;
+  }
+
+  Metrics voltageMetrics{};
+  Metrics rawVoltageMetrics{};
+  if (!CALIBRATION_MODE &&
+      !captureWindow(Ads::INPMUX_IN3_IN2, 1.0f, 0.0f,
+                     voltageMetrics, rawVoltageMetrics)) {
+    Serial.println("[ADC] Voltage capture failed.");
     maintainConnections();
     delay(100);
     return;
   }
 
   const uint32_t now = millis();
-  if (static_cast<uint32_t>(now - lastPublishMs) >= PUBLISH_INTERVAL_MS) {
+  const uint32_t interval = CALIBRATION_MODE
+                                ? CALIBRATION_REPORT_INTERVAL_MS
+                                : PUBLISH_INTERVAL_MS;
+  if (static_cast<uint32_t>(now - lastPublishMs) >= interval) {
     lastPublishMs = now;
-    buildAndQueuePayload(metrics);
+    if (CALIBRATION_MODE) {
+      printCalibrationReport(rawCurrentMetrics, currentMetrics);
+    } else {
+      buildAndQueuePayload(currentMetrics, rawCurrentMetrics,
+                           voltageMetrics, rawVoltageMetrics);
+    }
   }
 
-  maintainConnections();
+  if (!CALIBRATION_MODE) {
+    maintainConnections();
+  }
   delay(25);
 }
