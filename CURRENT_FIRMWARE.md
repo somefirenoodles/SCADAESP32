@@ -45,7 +45,7 @@ Campos principales:
 
 El cliente implementa MQTT 3.1.1 estandar y no usa funciones de HiveMQ. El broker puede ser Mosquitto, EMQX, HiveMQ u otro compatible cambiando solamente `secrets.h`.
 
-Las publicaciones usan QoS 1 y solamente salen de la cola cuando el broker responde con `PUBACK`. Durante una interrupcion conserva las ultimas 16 publicaciones en RAM. Si la cola se llena, elimina primero la mas antigua y aumenta `descartados`.
+Las publicaciones periodicas usan QoS 0 sobre TCP para mantener una sesion estable y evitar bloquear la adquisicion esperando confirmaciones. Durante una interrupcion de WiFi o del broker conserva las ultimas 16 publicaciones en RAM; al reconectarse intenta enviarlas en orden. Si la cola se llena, elimina primero la mas antigua y aumenta `descartados`.
 
 ## Cableado ADS1263
 

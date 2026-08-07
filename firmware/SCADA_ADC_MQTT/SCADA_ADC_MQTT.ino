@@ -98,6 +98,7 @@ constexpr uint32_t PUBLISH_INTERVAL_MS = 5000;
 constexpr uint32_t WIFI_RETRY_MS = 10000;
 constexpr uint32_t MQTT_RETRY_MS = 5000;
 constexpr uint16_t MQTT_KEEPALIVE_S = 60;
+constexpr uint8_t MQTT_PUBLISH_QOS = 0;
 constexpr size_t MQTT_PAYLOAD_SIZE = 384;
 constexpr size_t MQTT_QUEUE_SIZE = 16;
 
@@ -544,6 +545,59 @@ bool sendMqttPacket(uint8_t header, const uint8_t* body, size_t bodyLength) {
   return true;
 }
 
+bool readMqttByte(uint8_t& value, uint32_t deadlineMs) {
+  while (static_cast<int32_t>(millis() - deadlineMs) < 0) {
+    if (mqttSocket != nullptr && mqttSocket->available() > 0) {
+      const int byteRead = mqttSocket->read();
+      if (byteRead >= 0) {
+        value = static_cast<uint8_t>(byteRead);
+        return true;
+      }
+    }
+    if (mqttSocket == nullptr || !mqttSocket->connected()) {
+      return false;
+    }
+    delay(1);
+  }
+  return false;
+}
+
+bool readMqttPacket(uint8_t& header, uint8_t* body, size_t bodyCapacity,
+                    size_t& bodyLength, uint32_t timeoutMs) {
+  const uint32_t deadlineMs = millis() + timeoutMs;
+  if (!readMqttByte(header, deadlineMs)) {
+    return false;
+  }
+
+  bodyLength = 0;
+  size_t multiplier = 1;
+  for (uint8_t encodedBytes = 0; encodedBytes < 4; ++encodedBytes) {
+    uint8_t encoded = 0;
+    if (!readMqttByte(encoded, deadlineMs)) {
+      return false;
+    }
+    bodyLength += static_cast<size_t>(encoded & 0x7F) * multiplier;
+    if ((encoded & 0x80) == 0) {
+      break;
+    }
+    if (encodedBytes == 3) {
+      return false;
+    }
+    multiplier *= 128;
+  }
+
+  if (bodyLength > bodyCapacity) {
+    return false;
+  }
+  for (size_t index = 0; index < bodyLength; ++index) {
+    if (!readMqttByte(body[index], deadlineMs)) {
+      return false;
+    }
+  }
+  lastMqttActivityMs = millis();
+  return true;
+}
+
 bool mqttConnect() {
   if (WiFi.status() != WL_CONNECTED) {
     return false;
@@ -604,10 +658,12 @@ bool mqttConnect() {
     return false;
   }
 
-  mqttSocket->setTimeout(3000);
+  uint8_t connAckHeader = 0;
   uint8_t connAck[4];
-  if (mqttSocket->readBytes(connAck, sizeof(connAck)) != sizeof(connAck) ||
-      connAck[0] != 0x20 || connAck[1] != 0x02 || connAck[3] != 0x00) {
+  size_t connAckLength = 0;
+  if (!readMqttPacket(connAckHeader, connAck, sizeof(connAck),
+                      connAckLength, 3000) ||
+      connAckHeader != 0x20 || connAckLength != 2 || connAck[1] != 0x00) {
     Serial.println("[MQTT] Broker rejected or did not answer CONNECT.");
     mqttSocket->stop();
     return false;
@@ -625,34 +681,56 @@ bool mqttPublish(const char* payload) {
   if (!appendMqttString(body, sizeof(body), position, SCADA_MQTT_TOPIC)) {
     return false;
   }
-  ++mqttPacketId;
-  if (mqttPacketId == 0) {
+  if (MQTT_PUBLISH_QOS == 1) {
     ++mqttPacketId;
+    if (mqttPacketId == 0) {
+      ++mqttPacketId;
+    }
+    body[position++] = static_cast<uint8_t>(mqttPacketId >> 8);
+    body[position++] = static_cast<uint8_t>(mqttPacketId & 0xFF);
   }
-  body[position++] = static_cast<uint8_t>(mqttPacketId >> 8);
-  body[position++] = static_cast<uint8_t>(mqttPacketId & 0xFF);
   const size_t payloadLength = strlen(payload);
   if (position + payloadLength > sizeof(body)) {
     return false;
   }
   memcpy(body + position, payload, payloadLength);
   position += payloadLength;
-  if (!sendMqttPacket(0x32, body, position)) {
+  const uint8_t publishHeader = MQTT_PUBLISH_QOS == 1 ? 0x32 : 0x30;
+  if (!sendMqttPacket(publishHeader, body, position)) {
     return false;
+  }
+  if (MQTT_PUBLISH_QOS == 0) {
+    return true;
   }
 
-  mqttSocket->setTimeout(2000);
-  uint8_t pubAck[4];
-  if (mqttSocket->readBytes(pubAck, sizeof(pubAck)) != sizeof(pubAck) ||
-      pubAck[0] != 0x40 || pubAck[1] != 0x02 ||
-      pubAck[2] != static_cast<uint8_t>(mqttPacketId >> 8) ||
-      pubAck[3] != static_cast<uint8_t>(mqttPacketId & 0xFF)) {
-    Serial.println("[MQTT] Missing or invalid PUBACK; retaining message.");
-    mqttSocket->stop();
-    return false;
+  const uint32_t ackDeadlineMs = millis() + 3000;
+  while (static_cast<int32_t>(millis() - ackDeadlineMs) < 0) {
+    uint8_t responseHeader = 0;
+    uint8_t responseBody[8];
+    size_t responseLength = 0;
+    const uint32_t remainingMs = ackDeadlineMs - millis();
+    if (!readMqttPacket(responseHeader, responseBody, sizeof(responseBody),
+                        responseLength, remainingMs)) {
+      break;
+    }
+
+    const uint8_t packetType = responseHeader & 0xF0;
+    if (packetType == 0xD0 && responseLength == 0) {
+      continue;
+    }
+    if (packetType == 0x40 && responseLength == 2 &&
+        responseBody[0] == static_cast<uint8_t>(mqttPacketId >> 8) &&
+        responseBody[1] == static_cast<uint8_t>(mqttPacketId & 0xFF)) {
+      lastMqttActivityMs = millis();
+      return true;
+    }
+    Serial.printf("[MQTT] Unexpected packet type=0x%02X length=%u.\n",
+                  packetType, static_cast<unsigned int>(responseLength));
   }
-  lastMqttActivityMs = millis();
-  return true;
+
+  Serial.println("[MQTT] Missing or invalid PUBACK; retaining message.");
+  mqttSocket->stop();
+  return false;
 }
 
 void enqueueMessage(const char* payload) {
