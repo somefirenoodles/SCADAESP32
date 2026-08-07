@@ -2,8 +2,8 @@
   SCADA EV: SCT-013 + ADS1263 + ESP32 + MQTT
 
   Analog input:
-    ADS1263 IN9 positive input
-    ADS1263 IN1 negative input
+    ADS1263 IN1 positive input
+    ADS1263 IN0 negative input
 
   ADS1263 SPI:
     CS=27, SCLK=18, MISO/DOUT=19, MOSI/DIN=23, DRDY=25, RESET=26
@@ -65,7 +65,7 @@ constexpr uint8_t MODE2_PGA_BYPASS_2400_SPS = 0x8A;
 constexpr uint8_t MODE2_PGA_GAIN1_2400_SPS = 0x0A;
 constexpr uint8_t REFMUX_INTERNAL_2V5 = 0x00;
 constexpr uint8_t REFMUX_AVDD_AVSS = 0x24;
-constexpr uint8_t INPMUX_IN9_IN1 = 0x91;
+constexpr uint8_t INPMUX_IN1_IN0 = 0x10;
 constexpr uint8_t INPMUX_ANALOG_SUPPLY_MONITOR = 0xCC;
 }  // namespace Ads
 
@@ -73,7 +73,7 @@ constexpr float NOMINAL_ANALOG_SUPPLY_V = 5.000f;
 constexpr float INTERNAL_REFERENCE_V = 2.500f;
 
 // Previous IN9-COM calibration. CALIBRATION_MODE reports replacement values
-// for the new IN9-IN1 differential wiring; do not change them by estimation.
+// for the new IN1-IN0 differential wiring; do not change them by estimation.
 constexpr float INPUT_CAL_GAIN = 0.8995233f;
 constexpr float INPUT_CAL_OFFSET_V = -0.0390393f;
 
@@ -274,7 +274,7 @@ bool configureAds1263() {
   writeRegister(Ads::REG_MODE1, Ads::MODE1_FIR);
   writeRegister(Ads::REG_MODE2, Ads::MODE2_PGA_BYPASS_2400_SPS);
   writeRegister(Ads::REG_REFMUX, Ads::REFMUX_AVDD_AVSS);
-  writeRegister(Ads::REG_INPMUX, Ads::INPMUX_IN9_IN1);
+  writeRegister(Ads::REG_INPMUX, Ads::INPMUX_IN1_IN0);
 
   bool ok = true;
   ok &= verifyRegister("POWER", Ads::REG_POWER, Ads::POWER_INTREF_ON);
@@ -285,7 +285,7 @@ bool configureAds1263() {
   ok &= verifyRegister("MODE2", Ads::REG_MODE2,
                        Ads::MODE2_PGA_BYPASS_2400_SPS);
   ok &= verifyRegister("REFMUX", Ads::REG_REFMUX, Ads::REFMUX_AVDD_AVSS);
-  ok &= verifyRegister("INPMUX", Ads::REG_INPMUX, Ads::INPMUX_IN9_IN1);
+  ok &= verifyRegister("INPMUX", Ads::REG_INPMUX, Ads::INPMUX_IN1_IN0);
   if (!ok) {
     return false;
   }
@@ -321,7 +321,7 @@ bool measureAnalogSupply(float& supplyV) {
 
   const bool restored =
       selectConversion(Ads::MODE2_PGA_BYPASS_2400_SPS,
-                       Ads::REFMUX_AVDD_AVSS, Ads::INPMUX_IN9_IN1);
+                       Ads::REFMUX_AVDD_AVSS, Ads::INPMUX_IN1_IN0);
   return ok && restored;
 }
 
@@ -447,7 +447,7 @@ float voltageRmsToCurrent(float rmsV) {
 }
 
 bool metricsAreValid(const Metrics& m, const Metrics& raw) {
-  // IN9-IN1 is bipolar: a negative differential voltage is valid. Only a
+  // IN1-IN0 is bipolar: a negative differential voltage is valid. Only a
   // value close to either differential full-scale limit indicates a rail.
   const bool lowRail = raw.minV < -(adcFullScaleV - 0.05f);
   const bool highRail = raw.maxV > (adcFullScaleV - 0.05f);
@@ -461,7 +461,7 @@ bool metricsAreValid(const Metrics& m, const Metrics& raw) {
 
 void printCalibrationReport(const Metrics& raw, const Metrics& calibrated) {
   Serial.printf(
-      "[RAW IN9-IN1] media=%.6f V | AC_RMS=%.6f V | Vpp=%.6f V | "
+      "[RAW IN1-IN0] media=%.6f V | AC_RMS=%.6f V | Vpp=%.6f V | "
       "min=%.6f V | max=%.6f V | f=%.2f Hz | Fs=%.1f SPS\n",
       raw.meanV, raw.rmsAcV, raw.vppV, raw.minV, raw.maxV,
       raw.frequencyHz, raw.sampleRate);
@@ -742,7 +742,7 @@ void setup() {
   Serial.begin(115200);
   delay(800);
   Serial.println("\n[BOOT] SCADA SCT-013 + ADS1263");
-  Serial.println("[ADC] Entrada diferencial IN9-IN1");
+  Serial.println("[ADC] Entrada diferencial IN1-IN0");
 
   pinMode(Pins::CS, OUTPUT);
   pinMode(Pins::RESET, OUTPUT);

@@ -9,7 +9,7 @@ firmware/SCADA_ADC_MQTT/SCADA_ADC_MQTT.ino
 La ruta de datos es:
 
 ```text
-SCT-013 -> burden y acondicionamiento -> ADS1263 IN9-IN1 -> ESP32 -> MQTT -> servidor Ubuntu
+SCT-013 -> burden y acondicionamiento -> ADS1263 IN1-IN0 -> ESP32 -> MQTT -> servidor Ubuntu
 ```
 
 ## Preparacion
@@ -34,7 +34,7 @@ Campos principales:
 
 - `corriente_rms_a`: corriente primaria calculada para SCT-013-000 100 A / 50 mA y burden de 22 ohm.
 - `senal_rms_v`: RMS AC medido en el ADS1263.
-- `bias_v`: media de la tension diferencial IN9-IN1, conservada con ese nombre por compatibilidad del mensaje.
+- `bias_v`: media de la tension diferencial IN1-IN0, conservada con ese nombre por compatibilidad del mensaje.
 - `frecuencia_hz`: frecuencia detectada.
 - `valido`: indica que no existen rieles, referencia flotante ni frecuencia incompatible.
 - `cargando`: corriente valida igual o superior a 1 A.
@@ -61,9 +61,9 @@ Las publicaciones usan QoS 1 y solamente salen de la cola cuando el broker respo
 | AVDD | 5V |
 | AVSS/GND | GND |
 
-Se mide diferencialmente `IN9` respecto a `IN1` (`IN9-IN1`). Una tension diferencial negativa es valida y ya no se interpreta como saturacion. El firmware conserva la medicion de AVDD-AVSS para determinar su escala real.
+Se mide diferencialmente `IN1` respecto a `IN0` (`IN1-IN0`). Una tension diferencial negativa es valida y ya no se interpreta como saturacion. El firmware conserva la medicion de AVDD-AVSS para determinar su escala real.
 
-## Recalibracion IN9-IN1
+## Recalibracion IN1-IN0
 
 El firmware se entrega temporalmente con `CALIBRATION_MODE=true`. En ese modo desactiva WiFi/MQTT y espera en el generador:
 
@@ -71,4 +71,4 @@ El firmware se entrega temporalmente con `CALIBRATION_MODE=true`. En ese modo de
 Sine, 60 Hz, High=3.000 V, Low=2.000 V, Phase=0
 ```
 
-Conecte la salida del generador a IN9 y su retorno a IN1. El monitor serie a 115200 baud muestra `[RAW IN9-IN1]` y calcula `[CONST SUGERIDAS]` usando la media y el RMS de la senoide, que son mas resistentes al ruido que tomar solamente dos muestras extremas. Las constantes se sustituyen en el codigo despues de observar varias ventanas estables; posteriormente se cambia `CALIBRATION_MODE=false` para habilitar MQTT.
+Conecte la salida del generador a IN1 y su retorno a IN0. El monitor serie a 115200 baud muestra `[RAW IN1-IN0]` y calcula `[CONST SUGERIDAS]` usando la media y el RMS de la senoide, que son mas resistentes al ruido que tomar solamente dos muestras extremas. Las constantes se sustituyen en el codigo despues de observar varias ventanas estables; posteriormente se cambia `CALIBRATION_MODE=false` para habilitar MQTT.
