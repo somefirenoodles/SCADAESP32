@@ -72,3 +72,12 @@ Sine, 60 Hz, High=3.000 V, Low=2.000 V, Phase=0
 ```
 
 Conecte la salida del generador a IN1 y su retorno a IN0. El monitor serie a 115200 baud muestra `[RAW IN1-IN0]` y calcula `[CONST SUGERIDAS]` usando la media y el RMS de la senoide, que son mas resistentes al ruido que tomar solamente dos muestras extremas. Las constantes se sustituyen en el codigo despues de observar varias ventanas estables; posteriormente se cambia `CALIBRATION_MODE=false` para habilitar MQTT.
+
+La calibracion obtenida despues de corregir la polaridad fisica es:
+
+```text
+INPUT_CAL_GAIN=1.7803975
+INPUT_CAL_OFFSET_V=-1.1079215 V
+```
+
+El modo de calibracion tambien verifica la relacion Vpp/RMS de la senoide y rechaza ventanas de conexion, saturacion o deformacion antes de proponer constantes.

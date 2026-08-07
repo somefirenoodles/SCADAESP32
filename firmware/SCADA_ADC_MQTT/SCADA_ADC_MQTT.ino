@@ -72,10 +72,10 @@ constexpr uint8_t INPMUX_ANALOG_SUPPLY_MONITOR = 0xCC;
 constexpr float NOMINAL_ANALOG_SUPPLY_V = 5.000f;
 constexpr float INTERNAL_REFERENCE_V = 2.500f;
 
-// Previous IN9-COM calibration. CALIBRATION_MODE reports replacement values
-// for the new IN1-IN0 differential wiring; do not change them by estimation.
-constexpr float INPUT_CAL_GAIN = 0.8995233f;
-constexpr float INPUT_CAL_OFFSET_V = -0.0390393f;
+// IN1-IN0 calibration obtained with the SDG1032X after correcting polarity.
+// Source: Sine 60 Hz, Low=2.000 V, High=3.000 V, Phase=0.
+constexpr float INPUT_CAL_GAIN = 1.7803975f;
+constexpr float INPUT_CAL_OFFSET_V = -1.1079215f;
 
 // Keep true for the local SDG1032X calibration test. In this mode WiFi/MQTT
 // are disabled and no current value is published as if it were production.
@@ -476,16 +476,21 @@ void printCalibrationReport(const Metrics& raw, const Metrics& calibrated) {
   const float expectedPeak =
       (CALIBRATION_HIGH_V - CALIBRATION_LOW_V) * 0.5f;
   const float measuredPeak = raw.rmsAcV * sqrtf(2.0f);
+  const float sineShape =
+      raw.rmsAcV > 0.0f
+          ? raw.vppV / (2.0f * sqrtf(2.0f) * raw.rmsAcV)
+          : 0.0f;
   const bool sineIsValid =
       measuredPeak > 0.05f &&
-      fabsf(raw.frequencyHz - CALIBRATION_FREQUENCY_HZ) <= 1.0f;
+      fabsf(raw.frequencyHz - CALIBRATION_FREQUENCY_HZ) <= 1.0f &&
+      sineShape >= 0.90f && sineShape <= 1.10f;
 
   if (!sineIsValid) {
     Serial.printf(
         "[CAL ESPERA] Aplique seno %.1f Hz, Low=%.3f V, High=%.3f V, "
-        "Phase=0.\n",
+        "Phase=0 (shape=%.3f).\n",
         CALIBRATION_FREQUENCY_HZ, CALIBRATION_LOW_V,
-        CALIBRATION_HIGH_V);
+        CALIBRATION_HIGH_V, sineShape);
     return;
   }
 
