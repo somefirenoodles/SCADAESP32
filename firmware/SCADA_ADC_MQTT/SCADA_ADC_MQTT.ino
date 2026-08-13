@@ -9,7 +9,8 @@
     CS=27, SCLK=18, MISO/DOUT=19, MOSI/DIN=23, DRDY=25, RESET=26
 
   Current sensor defaults:
-    SCT-013-000, 100 A / 50 mA, external burden 22 ohm
+    SCT-013 voltage-output model, 100 A / 1 V
+    The sensor has an internal burden; external RB must be removed.
 
   MQTT is standard MQTT 3.1.1 over TCP or TLS. No vendor API is used.
 */
@@ -89,9 +90,11 @@ constexpr float CALIBRATION_HIGH_V = 3.000f;
 constexpr float CALIBRATION_FREQUENCY_HZ = 60.0f;
 constexpr uint32_t CALIBRATION_REPORT_INTERVAL_MS = 1000;
 
-constexpr float SCT_PRIMARY_A = 100.0f;
-constexpr float SCT_SECONDARY_A = 0.050f;
-constexpr float BURDEN_OHM = 22.0f;
+// Nominal transfer ratio printed on the voltage-output SCT. The external
+// burden resistor RB is not part of this configuration. Re-adjust
+// CURRENT_CAL_GAIN against a trusted clamp meter after installation.
+constexpr float SCT_RATED_PRIMARY_A = 100.0f;
+constexpr float SCT_RATED_OUTPUT_V = 1.0f;
 constexpr float CURRENT_CAL_GAIN = 1.0f;
 constexpr float CHARGING_THRESHOLD_A = 1.0f;
 
@@ -106,6 +109,7 @@ constexpr size_t WINDOW_SAMPLES = 1200;
 constexpr uint32_t DRDY_TIMEOUT_US = 100000;
 constexpr float MIN_FREQUENCY_RMS_V = 0.005f;
 constexpr uint32_t PUBLISH_INTERVAL_MS = 5000;
+constexpr uint32_t ADC_RETRY_MS = 5000;
 constexpr uint32_t WIFI_RETRY_MS = 10000;
 constexpr uint32_t MQTT_RETRY_MS = 5000;
 constexpr uint16_t MQTT_KEEPALIVE_S = 60;
@@ -126,11 +130,14 @@ uint32_t statusErrors = 0;
 uint32_t drdyTimeouts = 0;
 uint32_t sequenceNumber = 0;
 uint32_t droppedMessages = 0;
+uint32_t lastAdcAttemptMs = 0;
 uint32_t lastWifiAttemptMs = 0;
 uint32_t lastMqttAttemptMs = 0;
 uint32_t lastMqttActivityMs = 0;
 uint32_t lastPublishMs = 0;
 uint16_t mqttPacketId = 0;
+bool adcAvailable = false;
+bool wifiInfoPrinted = false;
 
 struct Metrics {
   float meanV;
@@ -465,8 +472,9 @@ bool captureWindow(uint8_t inpmux, float gain, float offsetV,
 }
 
 float voltageRmsToCurrent(float rmsV) {
-  const float transformerRatio = SCT_PRIMARY_A / SCT_SECONDARY_A;
-  return rmsV * transformerRatio / BURDEN_OHM * CURRENT_CAL_GAIN;
+  const float sensorAmpsPerVolt =
+      SCT_RATED_PRIMARY_A / SCT_RATED_OUTPUT_V;
+  return rmsV * sensorAmpsPerVolt * CURRENT_CAL_GAIN;
 }
 
 bool metricsAreValid(const Metrics& m, const Metrics& raw) {
@@ -638,6 +646,8 @@ bool mqttConnect() {
     mqttSocket = &plainClient;
   }
 
+  // Use the same hostname/port connection path as the previously verified
+  // MQTT build. WiFiClient resolves a numeric IPv4 address internally too.
   if (!mqttSocket->connect(SCADA_MQTT_HOST, SCADA_MQTT_PORT)) {
     Serial.printf("[MQTT] TCP connection failed: %s:%u\n", SCADA_MQTT_HOST,
                   SCADA_MQTT_PORT);
@@ -781,6 +791,7 @@ void flushMqttQueue() {
 void maintainConnections() {
   const uint32_t now = millis();
   if (WiFi.status() != WL_CONNECTED) {
+    wifiInfoPrinted = false;
     if (static_cast<uint32_t>(now - lastWifiAttemptMs) >= WIFI_RETRY_MS) {
       lastWifiAttemptMs = now;
       WiFi.disconnect();
@@ -788,6 +799,21 @@ void maintainConnections() {
       Serial.println("[WIFI] Connecting...");
     }
     return;
+  }
+
+  if (!wifiInfoPrinted) {
+    Serial.printf("[WIFI] SSID=%s | RSSI=%d dBm | MAC=%s\n",
+                  WiFi.SSID().c_str(), WiFi.RSSI(),
+                  WiFi.macAddress().c_str());
+    Serial.print("[WIFI] IP=");
+    Serial.print(WiFi.localIP());
+    Serial.print(" | gateway=");
+    Serial.print(WiFi.gatewayIP());
+    Serial.print(" | mask=");
+    Serial.println(WiFi.subnetMask());
+    Serial.printf("[MQTT] Target=%s:%u | topic=%s\n", SCADA_MQTT_HOST,
+                  SCADA_MQTT_PORT, SCADA_MQTT_TOPIC);
+    wifiInfoPrinted = true;
   }
 
   if (mqttSocket == nullptr || !mqttSocket->connected()) {
@@ -815,9 +841,12 @@ void maintainConnections() {
 void buildAndQueuePayload(const Metrics& current,
                           const Metrics& rawCurrent,
                           const Metrics& voltage,
-                          const Metrics& rawVoltage) {
-  const bool currentValid = metricsAreValid(current, rawCurrent);
-  const bool voltageValid = metricsAreValid(voltage, rawVoltage);
+                          const Metrics& rawVoltage,
+                          bool adcIsAvailable) {
+  const bool currentValid =
+      adcIsAvailable && metricsAreValid(current, rawCurrent);
+  const bool voltageValid =
+      adcIsAvailable && metricsAreValid(voltage, rawVoltage);
   const float currentRmsA =
       currentValid ? voltageRmsToCurrent(current.rmsAcV) : 0.0f;
   const bool charging =
@@ -837,7 +866,8 @@ void buildAndQueuePayload(const Metrics& current,
   const int written = snprintf(
       payload, sizeof(payload),
       "{\"version\":2,\"dispositivo\":\"%s\",\"secuencia\":%lu,"
-      "\"timestamp_unix\":%lld,\"corriente_rms_a\":%.4f,"
+      "\"timestamp_unix\":%lld,\"adc_disponible\":%s,"
+      "\"corriente_rms_a\":%.4f,"
       "\"senal_rms_v\":%.6f,\"bias_v\":%.6f,\"vpp_v\":%.6f,"
       "\"frecuencia_hz\":%.3f,\"muestreo_sps\":%.1f,"
       "\"valido\":%s,\"cargando\":%s,"
@@ -848,7 +878,8 @@ void buildAndQueuePayload(const Metrics& current,
       "\"voltaje_calibrado\":%s,\"cola\":%u,"
       "\"descartados\":%lu,\"uptime_ms\":%lu}",
       SCADA_DEVICE_ID, static_cast<unsigned long>(++sequenceNumber),
-      static_cast<long long>(now > 1700000000 ? now : 0), currentRmsA,
+      static_cast<long long>(now > 1700000000 ? now : 0),
+      adcIsAvailable ? "true" : "false", currentRmsA,
       current.rmsAcV, current.meanV, current.vppV,
       current.frequencyHz, current.sampleRate,
       currentValid ? "true" : "false", charging ? "true" : "false",
@@ -866,6 +897,26 @@ void buildAndQueuePayload(const Metrics& current,
   }
   enqueueMessage(payload);
   Serial.println(payload);
+}
+
+bool initializeAdc() {
+  lastAdcAttemptMs = millis();
+  if (!configureAds1263()) {
+    Serial.println(
+        "[ADC] Not available; MQTT continues with invalid measurements.");
+    return false;
+  }
+
+  float measuredSupplyV;
+  if (measureAnalogSupply(measuredSupplyV)) {
+    adcFullScaleV = measuredSupplyV;
+    Serial.printf("[ADC] AVDD-AVSS=%.5f V\n", adcFullScaleV);
+  } else {
+    adcFullScaleV = NOMINAL_ANALOG_SUPPLY_V;
+    Serial.println("[ADC] Supply monitor failed; using 5.000 V.");
+  }
+  Serial.println("[ADC] Online.");
+  return true;
 }
 
 void setup() {
@@ -888,18 +939,7 @@ void setup() {
     }
   }
 
-  while (!configureAds1263()) {
-    Serial.println("[ADC ERROR] Check power and SPI wiring. Retry in 2 s.");
-    delay(2000);
-  }
-
-  float measuredSupplyV;
-  if (measureAnalogSupply(measuredSupplyV)) {
-    adcFullScaleV = measuredSupplyV;
-    Serial.printf("[ADC] AVDD-AVSS=%.5f V\n", adcFullScaleV);
-  } else {
-    Serial.println("[ADC] Supply monitor failed; using 5.000 V.");
-  }
+  adcAvailable = initializeAdc();
 
   if (CALIBRATION_MODE) {
     WiFi.mode(WIFI_OFF);
@@ -923,28 +963,31 @@ void loop() {
     maintainConnections();
   }
 
-  Metrics currentMetrics;
-  Metrics rawCurrentMetrics;
-  if (!captureWindow(Ads::INPMUX_IN1_IN0, INPUT_CAL_GAIN,
-                     INPUT_CAL_OFFSET_V, currentMetrics,
-                     rawCurrentMetrics)) {
-    Serial.println("[ADC] Current capture failed.");
-    if (!CALIBRATION_MODE) {
-      maintainConnections();
-    }
-    delay(100);
-    return;
+  const uint32_t beforeCapture = millis();
+  if (!adcAvailable &&
+      static_cast<uint32_t>(beforeCapture - lastAdcAttemptMs) >=
+          ADC_RETRY_MS) {
+    adcAvailable = initializeAdc();
   }
 
+  Metrics currentMetrics{};
+  Metrics rawCurrentMetrics{};
   Metrics voltageMetrics{};
   Metrics rawVoltageMetrics{};
-  if (!CALIBRATION_MODE &&
+  if (adcAvailable &&
+      !captureWindow(Ads::INPMUX_IN1_IN0, INPUT_CAL_GAIN,
+                     INPUT_CAL_OFFSET_V, currentMetrics,
+                     rawCurrentMetrics)) {
+    Serial.println("[ADC] Current capture failed; entering degraded mode.");
+    adcAvailable = false;
+    lastAdcAttemptMs = millis();
+  }
+  if (adcAvailable && !CALIBRATION_MODE &&
       !captureWindow(Ads::INPMUX_IN3_IN2, 1.0f, 0.0f,
                      voltageMetrics, rawVoltageMetrics)) {
-    Serial.println("[ADC] Voltage capture failed.");
-    maintainConnections();
-    delay(100);
-    return;
+    Serial.println("[ADC] Voltage capture failed; entering degraded mode.");
+    adcAvailable = false;
+    lastAdcAttemptMs = millis();
   }
 
   const uint32_t now = millis();
@@ -957,7 +1000,8 @@ void loop() {
       printCalibrationReport(rawCurrentMetrics, currentMetrics);
     } else {
       buildAndQueuePayload(currentMetrics, rawCurrentMetrics,
-                           voltageMetrics, rawVoltageMetrics);
+                           voltageMetrics, rawVoltageMetrics,
+                           adcAvailable);
     }
   }
 
