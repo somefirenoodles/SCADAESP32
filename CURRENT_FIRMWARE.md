@@ -9,7 +9,7 @@ firmware/SCADA_ADC_MQTT/SCADA_ADC_MQTT.ino
 La ruta de datos es:
 
 ```text
-SCT-013 -> burden y acondicionamiento -> ADS1263 IN1-IN0
+SCT-013 con salida 100 A / 1 V -> referencia de 2.5 V -> ADS1263 IN1-IN0
 Sensor de voltaje aislado -> ADS1263 IN3-IN2
 ADS1263 -> ESP32 -> MQTT -> servidor Ubuntu
 ```
@@ -26,15 +26,15 @@ ADS1263 -> ESP32 -> MQTT -> servidor Ubuntu
 
 ## Topic y mensaje
 
-El dispositivo BR1 publica cada cinco segundos en:
+El ESP32 publica cada cinco segundos en:
 
 ```text
-scada/ev/br1/medicion
+ev
 ```
 
 Campos principales:
 
-- `corriente_rms_a`: corriente primaria calculada para SCT-013-000 100 A / 50 mA y burden de 22 ohm.
+- `corriente_rms_a`: corriente primaria calculada para el SCT de salida en voltaje, con relacion nominal 100 A / 1 V y ganancia final de calibracion.
 - `senal_rms_v`: RMS AC medido en el ADS1263.
 - `bias_v`: media de la tension diferencial IN1-IN0, conservada con ese nombre por compatibilidad del mensaje.
 - `frecuencia_hz`: frecuencia detectada.
@@ -69,6 +69,13 @@ Las publicaciones periodicas usan QoS 0 sobre TCP para mantener una sesion estab
 | AVSS/GND | GND |
 
 La corriente se mide diferencialmente en `IN1-IN0`. El voltaje acondicionado se mide en `IN3-IN2`, con IN3 positivo e IN2 negativo. Una tension diferencial negativa es valida y no se interpreta como saturacion. El firmware conserva la medicion de AVDD-AVSS para determinar su escala real. Nunca se conecta la red electrica directamente a una entrada del ADS1263: el canal IN3-IN2 requiere aislamiento y acondicionamiento.
+
+El SCT instalado ya incorpora su conversion a voltaje. La resistencia externa
+`RB` debe retirarse sin sustituirla por un puente. Se conservan R3 y R4 como
+divisor de referencia de 2.5 V y el capacitor de desacoplo. S1 se conecta a
+`IN1`; S2 y `IN0` comparten la referencia de 2.5 V. La relacion nominal usada
+por el codigo es 100 A / 1 V y `CURRENT_CAL_GAIN` se reajusta posteriormente
+contra una pinza amperimetrica True RMS.
 
 ## Calibracion del canal de voltaje
 
